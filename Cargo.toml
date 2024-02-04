@@ -1,11 +1,11 @@
 [package]
-name = "smolscale"
-version = "0.4.4"
-authors = ["nullchinchilla <nullchinchilla@pm.me>"]
+name = "smolscale2"
+version = "0.4.5"
+authors = ["nullchinchilla <nullchinchilla@pm.me>", "Delta4 <delta4chat@gmx.com>"]
 edition = "2021"
-description="A high-performance async-task scheduler"
+description="hitdns fork of original smolscale"
 license="ISC"
-repository="https://github.com/geph-official/smolscale"
+repository="https://github.com/delta4chat/smolscale"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
