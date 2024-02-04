@@ -9,16 +9,17 @@ use st3::fifo::{Stealer, Worker};
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    sync::atomic::{AtomicUsize, Ordering},
 };
+
+use crate::AtomicU128;
 
 /// The global task queue, also including handles for stealing from local queues.
 ///
 /// Tasks can be pushed to it. Popping requires first subscribing to it, producing a [LocalQueue], which then can be popped from.
 pub struct GlobalQueue {
     queue: parking_lot::Mutex<VecDeque<Runnable>>,
-    stealers: ShardedLock<FxHashMap<u64, Stealer<Runnable>>>,
-    id_ctr: AtomicUsize,
+    stealers: ShardedLock<FxHashMap<u128, Stealer<Runnable>>>,
+    id_ctr: AtomicU128,
     event: Event,
 }
 
@@ -28,7 +29,7 @@ impl GlobalQueue {
         Self {
             queue: Default::default(),
             stealers: Default::default(),
-            id_ctr: AtomicUsize::new(0),
+            id_ctr: AtomicU128::new(0),
             event: Event::new(),
         }
     }
@@ -47,7 +48,7 @@ impl GlobalQueue {
     /// Subscribes to tasks, returning a LocalQueue.
     pub fn subscribe(&self) -> LocalQueue<'_> {
         let worker = Worker::<Runnable>::new(1024);
-        let id = self.id_ctr.fetch_add(1, Ordering::Relaxed);
+        let id = self.id_ctr.fetch_add(1);
         self.stealers.write().unwrap().insert(id, worker.stealer());
 
         LocalQueue {
@@ -65,7 +66,7 @@ impl GlobalQueue {
 
 /// A thread-local queue, bound to some [GlobalQueue].
 pub struct LocalQueue<'a> {
-    id: u64,
+    id: u128,
     global: &'a GlobalQueue,
     local: Worker<Runnable>,
     // next_task: RefCell<Option<Runnable>>,
@@ -102,7 +103,7 @@ impl<'a> LocalQueue<'a> {
     fn steal_and_pop(&self) -> Option<Runnable> {
         {
             let stealers = self.global.stealers.read().unwrap();
-            let mut ids: SmallVec<[u64; 64]> = stealers.keys().copied().collect();
+            let mut ids: SmallVec<[u128; 64]> = stealers.keys().copied().collect();
             fastrand::shuffle(&mut ids);
             for id in ids {
                 if let Ok((val, count)) =

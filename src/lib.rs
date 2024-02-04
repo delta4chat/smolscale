@@ -19,13 +19,15 @@ use std::{
     io::stderr,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
     task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tabwriter::TabWriter;
+
+pub type AtomicU128 = crossbeam_utils::atomic::AtomicCell<u128>;
 
 mod fastcounter;
 pub mod immortal;
@@ -36,12 +38,12 @@ pub mod reaper;
 //const CHANGE_THRESH: u32 = 10;
 const MONITOR_MS: u64 = 1000;
 
-const MAX_THREADS: AtomicUsize = AtomicUsize::new(20);
+const MAX_THREADS: AtomicU128 = AtomicU128::new(20);
 
 static POLL_COUNT: Lazy<FastCounter> = Lazy::new(Default::default);
 
-static THREAD_COUNT: AtomicUsize = AtomicUsize::new(0); //Lazy<FastCounter> = Lazy::new(Default::default);
-static THREAD_INCR: AtomicUsize = AtomicUsize::new(0); 
+static THREAD_COUNT: AtomicU128 = AtomicU128::new(0); //Lazy<FastCounter> = Lazy::new(Default::default);
+static THREAD_INCR: AtomicU128 = AtomicU128::new(0); 
 
 static MONITOR: OnceCell<std::thread::JoinHandle<()>> = OnceCell::new();
 
@@ -57,13 +59,13 @@ pub fn permanently_single_threaded() {
     SINGLE_THREAD.store(true, Ordering::Relaxed);
 }
 
-pub fn set_max_threads(max: usize) {
-    MAX_THREADS.store(max, Ordering::Relaxed);
+pub fn set_max_threads(max: u128) {
+    MAX_THREADS.store(max);
 }
 
 /// Returns the number of running threads.
-pub fn running_threads() -> usize {
-    THREAD_COUNT.load(Ordering::Relaxed)
+pub fn running_threads() -> u128 {
+    THREAD_COUNT.load()
 }
 
 fn start_monitor() {
@@ -80,7 +82,7 @@ fn monitor_loop() {
         //return;
     }
     fn start_thread(exitable: bool, process_io: bool) {
-        let idx: usize = THREAD_INCR.fetch_add(1, Ordering::SeqCst);
+        let idx: u128 = THREAD_INCR.fetch_add(1);
         std::thread::Builder::new()
             .name(
                 if exitable {
@@ -90,16 +92,16 @@ fn monitor_loop() {
                 }
             )
             .spawn(move || {
-                let idx: usize = THREAD_COUNT.load(Ordering::SeqCst);
-                let max_idx: usize = MAX_THREADS.load(Ordering::SeqCst);
+                let idx: u128 = THREAD_COUNT.load();
+                let max_idx: u128 = MAX_THREADS.load();
                 if idx > max_idx {
                     log::info!("max threads({max_idx}) exceeded");
                     return;
                 }
 
-                THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
+                THREAD_COUNT.fetch_add(1);
                 scopeguard::defer!({
-                    THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
+                    THREAD_COUNT.fetch_sub(1);
                 });
 
                 // let local_exec = LEXEC.with(|v| Rc::clone(v));
@@ -137,7 +139,7 @@ fn monitor_loop() {
         .name("sscale-panic-safe".to_string())
         .spawn(|| {
             loop {
-                if THREAD_COUNT.load(Ordering::Relaxed) > 0 {
+                if THREAD_COUNT.load() > 0 {
                     std::thread::sleep(Duration::from_millis(MONITOR_MS));
                     continue;
                 }
@@ -200,7 +202,7 @@ pub fn spawn<T: Send + 'static>(
 }
 
 struct WrappedFuture<T, F: Future<Output = T>> {
-    task_id: u64,
+    task_id: u128,
     spawn_btrace: Option<Arc<Backtrace>>,
     fut: F,
 }
@@ -210,7 +212,7 @@ static ACTIVE_TASKS: Lazy<FastCounter> = Lazy::new(Default::default);
 static FUTURES_BEING_POLLED: Lazy<FastCounter> = Lazy::new(Default::default);
 
 /// Returns the current number of active tasks.
-pub fn active_task_count() -> usize {
+pub fn active_task_count() -> u128 {
     ACTIVE_TASKS.count()
 }
 
@@ -255,8 +257,8 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
 impl<T, F: Future<Output = T> + 'static> WrappedFuture<T, F> {
     pub fn new(fut: F) -> Self {
         ACTIVE_TASKS.incr();
-        static TASK_ID: AtomicUsize = AtomicUsize::new(0);
-        let task_id = TASK_ID.fetch_add(1, Ordering::Relaxed);
+        static TASK_ID: AtomicU128 = AtomicU128::new(0);
+        let task_id = TASK_ID.fetch_add(1);
         WrappedFuture {
             task_id,
             spawn_btrace: if *SMOLSCALE_PROFILE {
@@ -272,7 +274,7 @@ impl<T, F: Future<Output = T> + 'static> WrappedFuture<T, F> {
 }
 
 /// Profiling map.
-static PROFILE_MAP: Lazy<DashMap<u64, (Arc<Backtrace>, Duration)>> = Lazy::new(|| {
+static PROFILE_MAP: Lazy<DashMap<u128, (Arc<Backtrace>, Duration)>> = Lazy::new(|| {
     std::thread::Builder::new()
         .name("sscale-prof".into())
         .spawn(|| loop {
