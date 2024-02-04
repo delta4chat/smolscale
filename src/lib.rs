@@ -18,9 +18,8 @@ use std::io::Write;
 use std::{
     io::stderr,
     pin::Pin,
-    sync::atomic::AtomicUsize,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     task::{Context, Poll},
@@ -35,13 +34,14 @@ mod queues;
 pub mod reaper;
 
 //const CHANGE_THRESH: u32 = 10;
-const MONITOR_MS: u64 = 10;
+const MONITOR_MS: u64 = 1000;
 
-const MAX_THREADS: usize = 1500;
+const MAX_THREADS: AtomicUsize = AtomicUsize::new(20);
 
 static POLL_COUNT: Lazy<FastCounter> = Lazy::new(Default::default);
 
-static THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
+static THREAD_COUNT: AtomicUsize = AtomicUsize::new(0); //Lazy<FastCounter> = Lazy::new(Default::default);
+static THREAD_INCR: AtomicUsize = AtomicUsize::new(0); 
 
 static MONITOR: OnceCell<std::thread::JoinHandle<()>> = OnceCell::new();
 
@@ -53,7 +53,12 @@ static SMOLSCALE_PROFILE: Lazy<bool> = Lazy::new(|| std::env::var("SMOLSCALE_PRO
 
 /// Irrevocably puts smolscale into single-threaded mode.
 pub fn permanently_single_threaded() {
+    set_max_threads(1);
     SINGLE_THREAD.store(true, Ordering::Relaxed);
+}
+
+pub fn set_max_threads(max: usize) {
+    MAX_THREADS.store(max, Ordering::Relaxed);
 }
 
 /// Returns the number of running threads.
@@ -72,30 +77,38 @@ fn start_monitor() {
 
 fn monitor_loop() {
     if *SMOLSCALE_USE_AGEX {
-        return;
+        //return;
     }
     fn start_thread(exitable: bool, process_io: bool) {
-        THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        let idx: usize = THREAD_INCR.fetch_add(1, Ordering::SeqCst);
         std::thread::Builder::new()
             .name(
                 if exitable {
-                    "sscale-wkr-e"
+                    format!("sscale-wkr-e-{idx}")
                 } else {
-                    "sscale-wkr-c"
+                    format!("sscale-wkr-c-{idx}")
                 }
-                .into(),
             )
             .spawn(move || {
+                let idx: usize = THREAD_COUNT.load(Ordering::SeqCst);
+                let max_idx: usize = MAX_THREADS.load(Ordering::SeqCst);
+                if idx > max_idx {
+                    log::info!("max threads({max_idx}) exceeded");
+                    return;
+                }
+
+                THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
+                scopeguard::defer!({
+                    THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
+                });
+
                 // let local_exec = LEXEC.with(|v| Rc::clone(v));
                 let future = async {
-                    scopeguard::defer!({
-                        THREAD_COUNT.fetch_sub(1, Ordering::Relaxed);
-                    });
                     // let run_local = local_exec.run(futures_lite::future::pending::<()>());
                     if exitable {
                         new_executor::run_local_queue()
                             .or(async {
-                                async_io::Timer::after(Duration::from_secs(3)).await;
+                                async_io::Timer::after(Duration::from_secs(5)).await;
                             })
                             .await;
                     } else {
@@ -109,16 +122,31 @@ fn monitor_loop() {
                     futures_lite::future::block_on(future)
                 }
             })
-            .expect("cannot spawn thread");
+            .expect("cannot spawn worker thread");
     }
     if SINGLE_THREAD.load(Ordering::Relaxed) || std::env::var("SMOLSCALE_SINGLE").is_ok() {
         start_thread(false, true);
-        return;
+        //return;
     } else {
         for _ in 0..num_cpus::get() {
             start_thread(false, true);
         }
     }
+
+    std::thread::Builder::new()
+        .name("sscale-panic-safe".to_string())
+        .spawn(|| {
+            loop {
+                if THREAD_COUNT.load(Ordering::Relaxed) > 0 {
+                    std::thread::sleep(Duration::from_millis(MONITOR_MS));
+                    continue;
+                }
+
+                log::info!("start new thread for panic safe!");
+                start_thread(false, true);
+            }
+        })
+        .expect("cannot spawn panic safe thread");
 
     // "Token bucket"
     let mut token_bucket = 100;
@@ -128,7 +156,7 @@ fn monitor_loop() {
         }
         new_executor::global_rebalance();
         if SINGLE_THREAD.load(Ordering::Relaxed) {
-            return;
+            //return;
         }
         #[cfg(not(feature = "preempt"))]
         {
@@ -142,7 +170,6 @@ fn monitor_loop() {
             let running_tasks = FUTURES_BEING_POLLED.count();
             let running_threads = THREAD_COUNT.load(Ordering::Relaxed);
             if after_sleep == before_sleep
-                && running_threads <= MAX_THREADS
                 && token_bucket > 0
                 && running_tasks >= running_threads
             {
@@ -228,7 +255,7 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
 impl<T, F: Future<Output = T> + 'static> WrappedFuture<T, F> {
     pub fn new(fut: F) -> Self {
         ACTIVE_TASKS.incr();
-        static TASK_ID: AtomicU64 = AtomicU64::new(0);
+        static TASK_ID: AtomicUsize = AtomicUsize::new(0);
         let task_id = TASK_ID.fetch_add(1, Ordering::Relaxed);
         WrappedFuture {
             task_id,

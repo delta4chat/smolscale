@@ -23,6 +23,7 @@ impl FastCounter {
     }
 
     /// Get the total count
+    #[inline]
     pub fn count(&self) -> usize {
         self.counter.load(Ordering::Relaxed)
     }

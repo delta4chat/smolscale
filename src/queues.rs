@@ -9,7 +9,7 @@ use st3::fifo::{Stealer, Worker};
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 /// The global task queue, also including handles for stealing from local queues.
@@ -18,7 +18,7 @@ use std::{
 pub struct GlobalQueue {
     queue: parking_lot::Mutex<VecDeque<Runnable>>,
     stealers: ShardedLock<FxHashMap<u64, Stealer<Runnable>>>,
-    id_ctr: AtomicU64,
+    id_ctr: AtomicUsize,
     event: Event,
 }
 
@@ -28,7 +28,7 @@ impl GlobalQueue {
         Self {
             queue: Default::default(),
             stealers: Default::default(),
-            id_ctr: AtomicU64::new(0),
+            id_ctr: AtomicUsize::new(0),
             event: Event::new(),
         }
     }
