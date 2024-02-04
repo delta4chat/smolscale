@@ -170,7 +170,7 @@ fn monitor_loop() {
             std::thread::sleep(Duration::from_millis(MONITOR_MS));
             let after_sleep = POLL_COUNT.count();
             let running_tasks = FUTURES_BEING_POLLED.count();
-            let running_threads = THREAD_COUNT.load(Ordering::Relaxed);
+            let running_threads = THREAD_COUNT.load();
             if after_sleep == before_sleep
                 && token_bucket > 0
                 && running_tasks >= running_threads
