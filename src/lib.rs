@@ -10,7 +10,6 @@
 
 use async_compat::CompatExt;
 use backtrace::Backtrace;
-use dashmap::DashMap;
 use fastcounter::FastCounter;
 use futures_lite::prelude::*;
 use once_cell::sync::{Lazy, OnceCell};
@@ -245,7 +244,8 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
             let elapsed = start.elapsed();
             let mut entry = PROFILE_MAP
                 .entry(task_id)
-                .or_insert_with(|| (btrace.unwrap(), Duration::from_secs(0)));
+                .or_insert_with(|| (btrace.unwrap(), Duration::from_secs(0)))
+                .get_mut().to_owned();
             entry.1 += elapsed * 100;
             result
         } else {
@@ -263,7 +263,7 @@ impl<T, F: Future<Output = T> + 'static> WrappedFuture<T, F> {
             task_id,
             spawn_btrace: if *SMOLSCALE_PROFILE {
                 let bt = Arc::new(Backtrace::new());
-                PROFILE_MAP.insert(task_id, (bt.clone(), Duration::from_secs(0)));
+                PROFILE_MAP.insert(task_id, (bt.clone(), Duration::from_secs(0))).expect("bug: duplicated task id");
                 Some(bt)
             } else {
                 None
@@ -274,14 +274,14 @@ impl<T, F: Future<Output = T> + 'static> WrappedFuture<T, F> {
 }
 
 /// Profiling map.
-static PROFILE_MAP: Lazy<DashMap<u128, (Arc<Backtrace>, Duration)>> = Lazy::new(|| {
+static PROFILE_MAP: Lazy<scc::HashMap<u128, (Arc<Backtrace>, Duration)>> = Lazy::new(|| {
     std::thread::Builder::new()
         .name("sscale-prof".into())
         .spawn(|| loop {
-            let mut vv = PROFILE_MAP
-                .iter()
-                .map(|k| (*k.key(), k.value().clone()))
-                .collect::<Vec<_>>();
+            let mut vv = vec![];
+            PROFILE_MAP.scan(|k, v| {
+                vv.push( (*k, v.clone()) );
+            });
             vv.sort_unstable_by_key(|s| s.1 .1);
             vv.reverse();
             eprintln!("----- SMOLSCALE PROFILE -----");

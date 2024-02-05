@@ -1,10 +1,7 @@
 use async_task::Runnable;
 
-use crossbeam_utils::sync::ShardedLock;
 use event_listener::{Event, EventListener};
 
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
 use st3::fifo::{Stealer, Worker};
 use std::{
     cell::RefCell,
@@ -18,7 +15,7 @@ use crate::AtomicU128;
 /// Tasks can be pushed to it. Popping requires first subscribing to it, producing a [LocalQueue], which then can be popped from.
 pub struct GlobalQueue {
     queue: parking_lot::Mutex<VecDeque<Runnable>>,
-    stealers: ShardedLock<FxHashMap<u128, Stealer<Runnable>>>,
+    stealers: scc::HashMap<u128, Stealer<Runnable>>,
     id_ctr: AtomicU128,
     event: Event,
 }
@@ -49,7 +46,8 @@ impl GlobalQueue {
     pub fn subscribe(&self) -> LocalQueue<'_> {
         let worker = Worker::<Runnable>::new(1024);
         let id = self.id_ctr.fetch_add(1);
-        self.stealers.write().unwrap().insert(id, worker.stealer());
+        self.stealers.entry(id)
+            .insert_entry(worker.stealer());
 
         LocalQueue {
             id,
@@ -79,7 +77,7 @@ impl<'a> Drop for LocalQueue<'a> {
             self.global.push(task);
         }
         // deregister the local queue from the global list
-        self.global.stealers.write().unwrap().remove(&self.id);
+        self.global.stealers.remove(&self.id);
     }
 }
 
@@ -102,12 +100,17 @@ impl<'a> LocalQueue<'a> {
     /// Steals a whole batch and pops one.
     fn steal_and_pop(&self) -> Option<Runnable> {
         {
-            let stealers = self.global.stealers.read().unwrap();
-            let mut ids: SmallVec<[u128; 64]> = stealers.keys().copied().collect();
+            let mut ids = vec![];
+            self.global.stealers.scan(|id, _|{
+                ids.push(*id);
+            });
             fastrand::shuffle(&mut ids);
-            for id in ids {
-                if let Ok((val, count)) =
-                    stealers[&id].steal_and_pop(&self.local, |n| (n / 2 + 1).min(64))
+            for id in ids.iter() {
+                let s = match self.global.stealers.get(id){
+                    Some(v) => v,
+                    None => { continue; },
+                };
+                if let Ok((val, count)) = s.get().steal_and_pop(&self.local, |n| (n / 2 + 1).min(64))
                 {
                     log::trace!("{} stole {} from {id}", count + 1, self.id);
                     return Some(val);
