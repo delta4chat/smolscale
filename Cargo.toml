@@ -1,6 +1,6 @@
 [package]
 name = "smolscale2"
-version = "0.4.5"
+version = "0.4.6"
 authors = ["nullchinchilla <nullchinchilla@pm.me>", "Delta4 <delta4chat@gmx.com>"]
 edition = "2021"
 description="hitdns fork of original smolscale"
