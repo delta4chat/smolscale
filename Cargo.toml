@@ -1,6 +1,6 @@
 [package]
 name = "smolscale2"
-version = "0.4.7"
+version = "0.4.8"
 authors = ["nullchinchilla <nullchinchilla@pm.me>", "Delta4 <delta4chat@gmx.com>"]
 edition = "2021"
 description="hitdns fork of original smolscale"
@@ -67,5 +67,5 @@ name = "my_benchmark"
 harness = false
 
 [features]
-# Defines a feature named `webp` that does not enable any other features.
 preempt = []
+
