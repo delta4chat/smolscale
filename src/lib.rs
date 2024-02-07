@@ -34,22 +34,27 @@ mod new_executor;
 mod queues;
 pub mod reaper;
 
-//const CHANGE_THRESH: u32 = 10;
-const MONITOR_MS: u64 = 1000;
+//static CHANGE_THRESH: u32 = 10;
+static MONITOR_MS: u64 = 1000;
 
-const MAX_THREADS: AtomicU128 = AtomicU128::new(20);
+static MAX_THREADS: AtomicU128 = AtomicU128::new(20);
 
 static POLL_COUNT: Lazy<FastCounter> = Lazy::new(Default::default);
 
 static THREAD_MAP: Lazy<scc::HashMap<u128, std::thread::JoinHandle<()>>> = Lazy::new(|| { scc::HashMap::new() });
+static THREAD_SPAWN_LOCK: Lazy<parking_lot::Mutex<()>> = Lazy::new(|| { parking_lot::Mutex::new(()) });
 
 static MONITOR: OnceCell<std::thread::JoinHandle<()>> = OnceCell::new();
 
 static SINGLE_THREAD: AtomicBool = AtomicBool::new(false);
 
-static SMOLSCALE_USE_AGEX: Lazy<bool> = Lazy::new(|| std::env::var("SMOLSCALE_USE_AGEX").is_ok());
+static SMOLSCALE_USE_AGEX: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SMOLSCALE_USE_AGEX").is_ok()
+});
 
-static SMOLSCALE_PROFILE: Lazy<bool> = Lazy::new(|| std::env::var("SMOLSCALE_PROFILE").is_ok());
+static SMOLSCALE_PROFILE: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SMOLSCALE_PROFILE").is_ok()
+});
 
 /// Irrevocably puts smolscale into single-threaded mode.
 pub fn permanently_single_threaded() {
@@ -100,6 +105,8 @@ fn monitor_loop() {
         //return;
     }
     fn start_thread(exitable: bool, process_io: bool) {
+        let _lock = THREAD_SPAWN_LOCK.lock();
+
         let current_threads: u128 = running_threads();
         let max_threads: u128 = MAX_THREADS.load();
 

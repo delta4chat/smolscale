@@ -18,12 +18,13 @@ impl FastCounter {
         }
 
         match self.counter.compare_exchange(prev, prev+1) {
-            Ok(v) => v,
-            Err(v) => {
+            Ok(_) => {},
+            Err(_) => {
                 log::warn!("fast counter: incr(): compare exchange failed");
-                v
             }
         }
+
+        self.count()
     }
 
     /// Decrement the counter, and returns current value
@@ -37,12 +38,13 @@ impl FastCounter {
         }
 
         match self.counter.compare_exchange(prev, prev-1) {
-            Ok(v) => v,
-            Err(v) => {
+            Ok(_) => {},
+            Err(_) => {
                 log::warn!("fast counter: decr(): compare exchange failed");
-                v
             }
         }
+
+        self.count()
     }
 
     /// Get the total count
