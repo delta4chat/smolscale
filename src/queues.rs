@@ -3,10 +3,7 @@ use async_task::Runnable;
 use event_listener::{Event, EventListener};
 
 use st3::fifo::{Stealer, Worker};
-use std::{
-    cell::RefCell,
-    collections::VecDeque,
-};
+use concurrent_queue::ConcurrentQueue;
 
 use crate::FastCounter;
 
@@ -14,7 +11,7 @@ use crate::FastCounter;
 ///
 /// Tasks can be pushed to it. Popping requires first subscribing to it, producing a [LocalQueue], which then can be popped from.
 pub struct GlobalQueue {
-    queue: parking_lot::Mutex<VecDeque<Runnable>>,
+    queue: ConcurrentQueue<Runnable>,
     stealers: scc::HashMap<u128, Stealer<Runnable>>,
     id_ctr: FastCounter,
     event: Event,
@@ -24,7 +21,7 @@ impl GlobalQueue {
     /// Creates a new GlobalQueue.
     pub fn new() -> Self {
         Self {
-            queue: Default::default(),
+            queue: ConcurrentQueue::unbounded(),
             stealers: Default::default(),
             id_ctr: Default::default(),
             event: Event::new(),
@@ -33,7 +30,7 @@ impl GlobalQueue {
 
     /// Pushes a task to the GlobalQueue, notifying at least one [LocalQueue].  
     pub fn push(&self, task: Runnable) {
-        self.queue.lock().push_back(task);
+        self.queue.push(task).unwrap();
         self.event.notify(1);
     }
 
@@ -119,16 +116,15 @@ impl<'a> LocalQueue<'a> {
         }
 
         // try stealing from the global
-        if let Some(mut global) = self.global.queue.try_lock() {
-            let to_steal = (global.len() / 2 + 1).min(64).min(global.len());
-            for _ in 0..to_steal {
-                let stolen = global.pop_front().unwrap();
-                if let Err(back) = self.local.push(stolen) {
+        let global = &self.global.queue;
+        let to_steal = (global.len() / 2 + 1).min(64).min(global.len());
+        for _ in 0..to_steal {
+            if let Ok(stolen) = global.pop() {
+                if let Err(back) = self.local.push(stolen){
                     return Some(back);
                 }
             }
-            return self.local.pop();
         }
-        None
+        return self.local.pop();
     }
 }

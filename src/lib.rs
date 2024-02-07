@@ -17,16 +17,16 @@ use std::io::Write;
 use std::{
     io::stderr,
     pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tabwriter::TabWriter;
 
-pub type AtomicU128 = crossbeam_utils::atomic::AtomicCell<u128>;
+use portable_atomic::{
+    AtomicU128, AtomicBool,
+    Ordering::Relaxed
+};
 
 mod fastcounter;
 pub mod immortal;
@@ -56,17 +56,19 @@ static SMOLSCALE_PROFILE: Lazy<bool> = Lazy::new(|| {
     std::env::var("SMOLSCALE_PROFILE").is_ok()
 });
 
-/// Irrevocably puts smolscale into single-threaded mode.
+/// [deprecated] Irrevocably puts smolscale into single-threaded mode.
+#[deprecated]
 pub fn permanently_single_threaded() {
     set_max_threads(1);
-    SINGLE_THREAD.store(true, Ordering::Relaxed);
+    SINGLE_THREAD.store(true, Relaxed);
 }
 
+/// set maximum number of worker threads
 pub fn set_max_threads(mut max: u128) {
     if max == 0 {
         max = 1;
     }
-    MAX_THREADS.store(max);
+    MAX_THREADS.store(max, Relaxed);
 }
 
 /// Returns the number of running worker threads.
@@ -108,7 +110,7 @@ fn monitor_loop() {
         let _lock = THREAD_SPAWN_LOCK.lock();
 
         let current_threads: u128 = running_threads();
-        let max_threads: u128 = MAX_THREADS.load();
+        let max_threads: u128 = MAX_THREADS.load(Relaxed);
 
         if current_threads >= max_threads {
             log::info!("cannot spawn new worker thread: max threads ({max_threads}) exceeded");
@@ -155,7 +157,7 @@ fn monitor_loop() {
 
         THREAD_MAP.insert(idx, thread).expect("cannot add spawned worker thread to global list of join handles");
     }
-    if SINGLE_THREAD.load(Ordering::Relaxed) || std::env::var("SMOLSCALE_SINGLE").is_ok() {
+    if SINGLE_THREAD.load(Relaxed) || std::env::var("SMOLSCALE_SINGLE").is_ok() {
         start_thread(false, true);
         //return;
     } else {
@@ -187,7 +189,7 @@ fn monitor_loop() {
             token_bucket += 1
         }
         new_executor::global_rebalance();
-        if SINGLE_THREAD.load(Ordering::Relaxed) {
+        if SINGLE_THREAD.load(Relaxed) {
             //return;
         }
         #[cfg(not(feature = "preempt"))]

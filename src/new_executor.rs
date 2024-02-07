@@ -24,8 +24,10 @@ thread_local! {
 
 /// Runs a queue
 pub async fn run_local_queue() {
-    LOCAL_QUEUE_ACTIVE.with(|r| r.set(true));
-    scopeguard::defer!(LOCAL_QUEUE_ACTIVE.with(|r| r.set(false)));
+    LOCAL_QUEUE_ACTIVE.with(|a| a.set(true));
+    scopeguard::defer!({
+        LOCAL_QUEUE_ACTIVE.with(|a| a.set(false));
+    });
     loop {
         // subscribe
         let local_evt = async {

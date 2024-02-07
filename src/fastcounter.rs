@@ -1,4 +1,4 @@
-use crate::AtomicU128;
+use crate::{AtomicU128, Relaxed};
 
 /// A write-mostly, read-rarely counter
 #[derive(Default, Debug)]
@@ -17,7 +17,10 @@ impl FastCounter {
             return prev;
         }
 
-        match self.counter.compare_exchange(prev, prev+1) {
+        match self.counter.compare_exchange(
+            prev, prev + 1,
+            Relaxed, Relaxed
+        ) {
             Ok(_) => {},
             Err(_) => {
                 log::warn!("fast counter: incr(): compare exchange failed");
@@ -37,7 +40,10 @@ impl FastCounter {
             return prev;
         }
 
-        match self.counter.compare_exchange(prev, prev-1) {
+        match self.counter.compare_exchange(
+            prev, prev - 1,
+            Relaxed, Relaxed
+        ) {
             Ok(_) => {},
             Err(_) => {
                 log::warn!("fast counter: decr(): compare exchange failed");
@@ -50,6 +56,6 @@ impl FastCounter {
     /// Get the total count
     #[inline]
     pub fn count(&self) -> u128 {
-        self.counter.load()
+        self.counter.load(Relaxed)
     }
 }

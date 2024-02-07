@@ -49,6 +49,8 @@ futures-util = "0.3.25"
 async-channel = "1.5.1"
 async-compat = "0.2.3"
 scc = { version = "2.0.16", features = ["serde"] }
+portable-atomic = "1.6.0"
+concurrent-queue = { version = "2.4.0", features = ["portable-atomic"] }
 
 [profile.release]
 panic = "abort"
