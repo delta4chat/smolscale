@@ -26,11 +26,30 @@ impl Immortal {
                         async_io::Timer::after(delay).await;
                     }
                     RespawnStrategy::JitterDelay(low, high) => {
-                        let low = low.min(high);
-                        let delay = Duration::from_millis(fastrand::u64(
-                            (low.as_millis() as u64)..=(high.as_millis() as u64),
-                        ));
-                        async_io::Timer::after(delay).await;
+                        let low: u128 = low.as_nanos();
+                        let high: u128 = high.as_nanos();
+
+                        let (low, high) = if low > high {
+                            (high, low)
+                        } else {
+                            (low, high)
+                        };
+
+                        assert!(low <= high);
+
+                        let delay =
+                            fastrand::u128(low..=high);
+
+                        let delay: u64 =
+                            if delay > (u64::MAX as u128) {
+                                u64::MAX
+                            } else {
+                                delay as u64
+                            };
+
+                        async_io::Timer::after(
+                            Duration::from_nanos(delay)
+                        ).await;
                     }
                 }
             }

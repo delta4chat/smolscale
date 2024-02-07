@@ -5,7 +5,13 @@ use event_listener::{Event, EventListener};
 use st3::fifo::{Stealer, Worker};
 use concurrent_queue::ConcurrentQueue;
 
-use crate::FastCounter;
+use once_cell::sync::Lazy;
+
+use crate::{FastCounter, AtomicBool, Relaxed};
+
+static QUEUE_ID: Lazy<FastCounter> = Lazy::new(Default::default);
+
+static GLOBAL_QUEUE_INIT: AtomicBool = AtomicBool::new(false);
 
 /// The global task queue, also including handles for stealing from local queues.
 ///
@@ -13,24 +19,33 @@ use crate::FastCounter;
 pub struct GlobalQueue {
     queue: ConcurrentQueue<Runnable>,
     stealers: scc::HashMap<u128, Stealer<Runnable>>,
-    id_ctr: FastCounter,
     event: Event,
 }
 
 impl GlobalQueue {
     /// Creates a new GlobalQueue.
+    /// # Panics
+    /// this constructor will panic if another GlobalQueue already initialized.
     pub fn new() -> Self {
+        if GLOBAL_QUEUE_INIT.load(Relaxed) {
+            panic!("programming error: global queue already initialized!");
+        }
+
+        GLOBAL_QUEUE_INIT.store(true, Relaxed);
+
         Self {
             queue: ConcurrentQueue::unbounded(),
-            stealers: Default::default(),
-            id_ctr: Default::default(),
+            stealers: scc::HashMap::new(),
             event: Event::new(),
         }
     }
 
     /// Pushes a task to the GlobalQueue, notifying at least one [LocalQueue].  
     pub fn push(&self, task: Runnable) {
-        self.queue.push(task).unwrap();
+        if let Err(err) = self.queue.push(task) {
+            log::error!("cannot push to global queue! error={err:?}");
+        }
+
         self.event.notify(1);
     }
 
@@ -42,9 +57,17 @@ impl GlobalQueue {
     /// Subscribes to tasks, returning a LocalQueue.
     pub fn subscribe(&self) -> LocalQueue<'_> {
         let worker = Worker::<Runnable>::new(1024);
-        let id = self.id_ctr.incr();
-        self.stealers.entry(id)
-            .insert_entry(worker.stealer());
+        let id = loop {
+            let n = QUEUE_ID.incr();
+            if let Ok(_) =
+                // scc::HashMap::insert() that does not overwrite if key already exists.
+                self.stealers.insert(n, worker.stealer())
+            {
+                break n;
+            } else {
+                log::warn!("bug: GlobalQueue.subscribe generates duplicated id! {n:?}");
+            }
+        };
 
         LocalQueue {
             id,
@@ -81,7 +104,8 @@ impl<'a> Drop for LocalQueue<'a> {
 impl<'a> LocalQueue<'a> {
     /// Pops a task from the local queue, other local queues, or the global queue.
     pub fn pop(&self) -> Option<Runnable> {
-        self.local.pop().or_else(|| self.steal_and_pop())
+        self.local.pop()
+            .or_else(|| { self.steal_and_pop() })
     }
 
     /// Pushes an item to the local queue, falling back to the global queue if the local queue is full.
@@ -103,11 +127,19 @@ impl<'a> LocalQueue<'a> {
             });
             fastrand::shuffle(&mut ids);
             for id in ids.iter() {
-                let s = match self.global.stealers.get(id){
-                    Some(v) => v,
-                    None => { continue; },
-                };
-                if let Ok((val, count)) = s.get().steal_and_pop(&self.local, |n| (n / 2 + 1).min(64))
+                let entry =
+                    match self.global.stealers.get(id) {
+                        Some(v) => v,
+                        None => { continue; },
+                    };
+
+                if let Ok((val, count)) =
+                    entry.get().steal_and_pop(
+                        &self.local,
+                        |n| {
+                            (n / 2 + 1).min(64)
+                        }
+                    )
                 {
                     log::trace!("{} stole {} from {id}", count + 1, self.id);
                     return Some(val);
@@ -117,7 +149,12 @@ impl<'a> LocalQueue<'a> {
 
         // try stealing from the global
         let global = &self.global.queue;
-        let to_steal = (global.len() / 2 + 1).min(64).min(global.len());
+        let global_len = global.len();
+        let to_steal =
+            (global_len / 2 + 1)
+            .min(64)
+            .min(global_len);
+
         for _ in 0..to_steal {
             if let Ok(stolen) = global.pop() {
                 if let Err(back) = self.local.push(stolen){
@@ -125,6 +162,7 @@ impl<'a> LocalQueue<'a> {
                 }
             }
         }
+
         return self.local.pop();
     }
 }

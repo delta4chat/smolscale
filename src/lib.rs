@@ -35,7 +35,7 @@ mod queues;
 pub mod reaper;
 
 //static CHANGE_THRESH: u32 = 10;
-static MONITOR_MS: u64 = 1000;
+static MONITOR_MS: u64 = 500;
 
 static MAX_THREADS: AtomicU128 = AtomicU128::new(20);
 
@@ -73,8 +73,8 @@ pub fn set_max_threads(mut max: u128) {
 
 /// Returns the number of running worker threads.
 pub fn running_threads() -> u128 {
-    let mut to_remove = vec![];
     let mut running = 0;
+    let mut to_remove = vec![];
 
     THREAD_MAP.scan(|idx, join| {
         if join.is_finished() {
@@ -98,7 +98,7 @@ fn start_monitor() {
         std::thread::Builder::new()
             .name("sscale-mon".into())
             .spawn(monitor_loop)
-            .unwrap()
+            .expect("cannot spawn monitor thread")
     });
 }
 
@@ -139,14 +139,17 @@ fn monitor_loop() {
                     if exitable {
                         new_executor::run_local_queue()
                             .or(async {
-                                async_io::Timer::after(Duration::from_secs(5)).await;
-                            })
-                            .await;
+                                async_io::Timer::after(
+                                    Duration::from_secs(5)
+                                ).await;
+                            }).await;
                     } else {
-                        new_executor::run_local_queue().await;
+                        new_executor::run_local_queue()
+                            .await;
                     };
                 }
                 .compat();
+
                 if process_io {
                     async_io::block_on(future)
                 } else {
@@ -167,7 +170,7 @@ fn monitor_loop() {
     }
 
     std::thread::Builder::new()
-        .name("sscale-panic-safe".to_string())
+        .name("sscale-watchdog".to_string())
         .spawn(|| {
             std::thread::sleep(Duration::from_millis(MONITOR_MS));
             loop {

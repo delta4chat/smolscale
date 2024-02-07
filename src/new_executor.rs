@@ -19,7 +19,7 @@ thread_local! {
 
     static LOCAL_QUEUE_ACTIVE: Cell<bool> = Cell::new(false);
 
-    static LOCAL_QUEUE_HOLDING: RefCell<Vec<Runnable>> = RefCell::new(vec![]);
+    //static LOCAL_QUEUE_HOLDING: RefCell<Vec<Runnable>> = RefCell::new(vec![]);
 }
 
 /// Runs a queue
@@ -28,6 +28,7 @@ pub async fn run_local_queue() {
     scopeguard::defer!({
         LOCAL_QUEUE_ACTIVE.with(|a| a.set(false));
     });
+
     loop {
         // subscribe
         let local_evt = async {
@@ -37,8 +38,27 @@ pub async fn run_local_queue() {
         };
         let evt = local_evt.or(GLOBAL_QUEUE.wait());
         {
-            while let Some(r) = LOCAL_QUEUE.with(|q| q.pop()) {
-                r.run();
+            while let Some(r) =
+                LOCAL_QUEUE.with(|q| q.pop())
+            {
+                if let Err(any_err) =
+                    std::panic::catch_unwind(||{r.run();})
+                {
+                    let thr = std::thread::current();
+                    log::error!(
+                        "worker thread ({thr:?}): 'Runnable' panic: error={1} | typeid={0:?}",
+                        any_err.type_id(),
+
+                        // try detect type of std::any::Any
+                        if any_err.is::<String>() {
+                            format!("{:?}", any_err.downcast::<String>())
+                        } else if any_err.is::<&str>() {
+                            format!("{:?}", any_err.downcast::<&str>())
+                        } else {
+                            format!("{:?}", any_err)
+                        }
+                    );
+                }
                 if fastrand::usize(0..256) == 0 {
                     futures_lite::future::yield_now().await;
                 }
@@ -55,7 +75,8 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let (runnable, task) = async_task::spawn(future, |runnable| {
+    let (runnable, task) =
+    async_task::spawn(future, |runnable| {
         // if the current thread is not processing tasks, we go to the global queue directly.
         if !LOCAL_QUEUE_ACTIVE.with(|r| r.get()) || fastrand::usize(0..512) == 0 {
             log::trace!("pushed to global queue");
@@ -74,3 +95,4 @@ where
 pub fn global_rebalance() {
     GLOBAL_QUEUE.rebalance();
 }
+
