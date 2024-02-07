@@ -8,7 +8,7 @@ use std::{
     collections::VecDeque,
 };
 
-use crate::AtomicU128;
+use crate::FastCounter;
 
 /// The global task queue, also including handles for stealing from local queues.
 ///
@@ -16,7 +16,7 @@ use crate::AtomicU128;
 pub struct GlobalQueue {
     queue: parking_lot::Mutex<VecDeque<Runnable>>,
     stealers: scc::HashMap<u128, Stealer<Runnable>>,
-    id_ctr: AtomicU128,
+    id_ctr: FastCounter,
     event: Event,
 }
 
@@ -26,7 +26,7 @@ impl GlobalQueue {
         Self {
             queue: Default::default(),
             stealers: Default::default(),
-            id_ctr: AtomicU128::new(0),
+            id_ctr: Default::default(),
             event: Event::new(),
         }
     }
@@ -45,7 +45,7 @@ impl GlobalQueue {
     /// Subscribes to tasks, returning a LocalQueue.
     pub fn subscribe(&self) -> LocalQueue<'_> {
         let worker = Worker::<Runnable>::new(1024);
-        let id = self.id_ctr.fetch_add(1);
+        let id = self.id_ctr.incr();
         self.stealers.entry(id)
             .insert_entry(worker.stealer());
 

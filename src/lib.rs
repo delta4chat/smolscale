@@ -41,8 +41,7 @@ const MAX_THREADS: AtomicU128 = AtomicU128::new(20);
 
 static POLL_COUNT: Lazy<FastCounter> = Lazy::new(Default::default);
 
-static THREAD_COUNT: AtomicU128 = AtomicU128::new(0); //Lazy<FastCounter> = Lazy::new(Default::default);
-static THREAD_INCR: AtomicU128 = AtomicU128::new(0); 
+static THREAD_MAP: Lazy<scc::HashMap<u128, std::thread::JoinHandle<()>>> = Lazy::new(|| { scc::HashMap::new() });
 
 static MONITOR: OnceCell<std::thread::JoinHandle<()>> = OnceCell::new();
 
@@ -58,13 +57,33 @@ pub fn permanently_single_threaded() {
     SINGLE_THREAD.store(true, Ordering::Relaxed);
 }
 
-pub fn set_max_threads(max: u128) {
+pub fn set_max_threads(mut max: u128) {
+    if max == 0 {
+        max = 1;
+    }
     MAX_THREADS.store(max);
 }
 
-/// Returns the number of running threads.
+/// Returns the number of running worker threads.
 pub fn running_threads() -> u128 {
-    THREAD_COUNT.load()
+    let mut to_remove = vec![];
+    let mut running = 0;
+
+    THREAD_MAP.scan(|idx, join| {
+        if join.is_finished() {
+            let name = join.thread().name();
+            log::warn!("worker thread (id={idx}, name={name:?}) exited!");
+            to_remove.push(*idx);
+        } else {
+            running += 1;
+        }
+    });
+
+    for rm_idx in to_remove {
+        THREAD_MAP.remove(&rm_idx);
+    }
+
+    running
 }
 
 fn start_monitor() {
@@ -81,8 +100,18 @@ fn monitor_loop() {
         //return;
     }
     fn start_thread(exitable: bool, process_io: bool) {
-        let idx: u128 = THREAD_INCR.fetch_add(1);
-        std::thread::Builder::new()
+        let current_threads: u128 = running_threads();
+        let max_threads: u128 = MAX_THREADS.load();
+
+        if current_threads >= max_threads {
+            log::info!("cannot spawn new worker thread: max threads ({max_threads}) exceeded");
+            return;
+        }
+
+        static THREAD_ID: Lazy<FastCounter> = Lazy::new(Default::default);
+        let idx: u128 = THREAD_ID.incr();
+
+        let thread = std::thread::Builder::new()
             .name(
                 if exitable {
                     format!("sscale-wkr-e-{idx}")
@@ -91,16 +120,8 @@ fn monitor_loop() {
                 }
             )
             .spawn(move || {
-                let idx: u128 = THREAD_COUNT.load();
-                let max_idx: u128 = MAX_THREADS.load();
-                if idx > max_idx {
-                    log::info!("max threads({max_idx}) exceeded");
-                    return;
-                }
-
-                THREAD_COUNT.fetch_add(1);
                 scopeguard::defer!({
-                    THREAD_COUNT.fetch_sub(1);
+                    THREAD_MAP.remove(&idx);
                 });
 
                 // let local_exec = LEXEC.with(|v| Rc::clone(v));
@@ -124,6 +145,8 @@ fn monitor_loop() {
                 }
             })
             .expect("cannot spawn worker thread");
+
+        THREAD_MAP.insert(idx, thread).expect("cannot add spawned worker thread to global list of join handles");
     }
     if SINGLE_THREAD.load(Ordering::Relaxed) || std::env::var("SMOLSCALE_SINGLE").is_ok() {
         start_thread(false, true);
@@ -137,8 +160,9 @@ fn monitor_loop() {
     std::thread::Builder::new()
         .name("sscale-panic-safe".to_string())
         .spawn(|| {
+            std::thread::sleep(Duration::from_millis(MONITOR_MS));
             loop {
-                if THREAD_COUNT.load() > 0 {
+                if running_threads() > 0 {
                     std::thread::sleep(Duration::from_millis(MONITOR_MS));
                     continue;
                 }
@@ -169,7 +193,7 @@ fn monitor_loop() {
             std::thread::sleep(Duration::from_millis(MONITOR_MS));
             let after_sleep = POLL_COUNT.count();
             let running_tasks = FUTURES_BEING_POLLED.count();
-            let running_threads = THREAD_COUNT.load();
+            let running_threads = running_threads();
             if after_sleep == before_sleep
                 && token_bucket > 0
                 && running_tasks >= running_threads
@@ -234,7 +258,9 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
         #[cfg(feature = "preempt")]
         FUTURES_BEING_POLLED.incr();
         #[cfg(feature = "preempt")]
-        scopeguard::defer!(FUTURES_BEING_POLLED.decr());
+        scopeguard::defer!({
+            FUTURES_BEING_POLLED.decr();
+        });
         let task_id = self.task_id;
         let btrace = self.spawn_btrace.as_ref().map(Arc::clone);
         let fut = unsafe { self.map_unchecked_mut(|v| &mut v.fut) };
@@ -257,8 +283,10 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
 impl<T, F: Future<Output = T> + 'static> WrappedFuture<T, F> {
     pub fn new(fut: F) -> Self {
         ACTIVE_TASKS.incr();
-        static TASK_ID: AtomicU128 = AtomicU128::new(0);
-        let task_id = TASK_ID.fetch_add(1);
+
+        static TASK_ID: Lazy<FastCounter> = Lazy::new(Default::default);
+        let task_id = TASK_ID.incr();
+
         WrappedFuture {
             task_id,
             spawn_btrace: if *SMOLSCALE_PROFILE {
