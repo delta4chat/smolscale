@@ -8,53 +8,62 @@ pub struct FastCounter {
 
 impl FastCounter {
     /// Increment the counter, and returns current value
-    #[inline]
+    #[inline(always)]
     pub fn incr(&self) -> u128 {
-        let prev = self.count();
-
-        if prev == u128::MAX {
-            log::error!("fast counter overflow! try incrementing the max value of unsigned 128-bit integer");
-            return prev;
-        }
-
-        match self.counter.compare_exchange(
-            prev, prev + 1,
-            Relaxed, Relaxed
-        ) {
-            Ok(_) => {},
-            Err(_) => {
-                log::warn!("fast counter: incr(): compare exchange failed");
-            }
-        }
-
+        self._update(true);
         self.count()
     }
 
     /// Decrement the counter, and returns current value
-    #[inline]
+    #[inline(always)]
     pub fn decr(&self) -> u128 {
-        let prev = self.count();
-
-        if prev == 0 {
-            log::error!("fast counter overflow! try decrementing to negative number!");
-            return prev;
-        }
-
-        match self.counter.compare_exchange(
-            prev, prev - 1,
-            Relaxed, Relaxed
-        ) {
-            Ok(_) => {},
-            Err(_) => {
-                log::warn!("fast counter: decr(): compare exchange failed");
-            }
-        }
-
+        self._update(false);
         self.count()
     }
 
+    #[inline(always)]
+    fn _update(&self, add: bool) -> Option<usize> {
+        let op = if add { "Add" } else { "Sub" };
+
+        for i in 0.. {
+            let prev = self.count();
+
+            let maybe_new =
+                if add {
+                    prev.checked_add(1)
+                } else {
+                    prev.checked_sub(1)
+                };
+            let new = match maybe_new {
+                Some(v) => v,
+                None => {
+                    log::error!("fast counter: u128 overflow! (update={op}, iterations={i})");
+                    return None;
+                }
+            };
+
+            match self.counter.compare_exchange(
+                prev, new,
+                Relaxed, Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(i);
+                },
+                Err(_) => {
+                    log::warn!("fast counter: compare exchange failed. (update={op}, iterations={i})");
+                }
+            }
+
+            if i > 10 {
+                break;
+            }
+        }
+
+        None
+    }
+
     /// Get the total count
-    #[inline]
+    #[inline(always)]
     pub fn count(&self) -> u128 {
         self.counter.load(Relaxed)
     }

@@ -266,13 +266,16 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         #[cfg(feature = "preempt")]
-        POLL_COUNT.incr();
-        #[cfg(feature = "preempt")]
-        FUTURES_BEING_POLLED.incr();
+        {
+            POLL_COUNT.incr();
+            FUTURES_BEING_POLLED.incr();
+        }
+
         #[cfg(feature = "preempt")]
         scopeguard::defer!({
             FUTURES_BEING_POLLED.decr();
         });
+
         let task_id = self.task_id;
         let btrace = self.spawn_btrace.as_ref().map(Arc::clone);
         let fut = unsafe { self.map_unchecked_mut(|v| &mut v.fut) };
