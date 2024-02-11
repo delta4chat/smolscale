@@ -91,12 +91,24 @@ impl From<u128> for FastCounter {
     }
 }
 
+static GLOBAL_NS: Lazy<String> =
+    Lazy::new(||{
+        let rand = fastrand::u128(..);
+        let pid = std::process::id();
+        format!("__GLOBAL_NAME_SPACE_{pid}_{rand}")
+    });
+
 /// generates Unique ID for specified name space.
 pub fn namespace_unique_id(ns: impl ToString) -> u128 {
     static CTRS: Lazy<scc::HashMap<String, FastCounter>> = Lazy::new(scc::HashMap::new);
 
+    let ns = ns.to_string();
+    if &ns != &*GLOBAL_NS {
+        unique_id();
+    }
+
     let ctr =
-        CTRS.entry(ns.to_string())
+        CTRS.entry(ns)
         .or_insert_with(FastCounter::new);
     let ctr = ctr.get();
 
@@ -111,13 +123,6 @@ pub fn namespace_unique_id(ns: impl ToString) -> u128 {
 
 /// generates ordered per-process-uniquely ID
 pub fn unique_id() -> u128 {
-    static GLOBAL_NS: Lazy<String> =
-        Lazy::new(||{
-            let rand = fastrand::u128(..);
-            let pid = std::process::id();
-            format!("__GLOBAL_NAME_SPACE_{pid}_{rand}")
-        });
-
     namespace_unique_id(&*GLOBAL_NS)
 }
 

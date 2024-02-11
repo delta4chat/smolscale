@@ -122,6 +122,23 @@ fn start_monitor() {
     });
 }
 
+pub(crate) fn any_fmt(
+    any: &dyn core::any::Any
+) -> String {
+    // try detect type of core::any::Any
+    if let Some(v) = any.downcast_ref::<String>() {
+        return v.to_owned();
+    }
+    if let Some(v) = any.downcast_ref::<&str>() {
+        return v.to_string();
+    }
+    if let Some(v)=any.downcast_ref::<std::io::Error>(){
+        return format!("{:?}", v);
+    }
+
+    format!("{:?}", &any)
+}
+
 fn monitor_loop() {
     use std::thread::sleep;
 

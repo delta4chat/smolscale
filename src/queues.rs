@@ -47,7 +47,7 @@ impl GlobalQueue {
     /// # Panics
     /// this constructor will panic if another GlobalQueue already initialized.
     pub fn new(sfo: u128) -> Self {
-        if once_cell::sync::Lazy::get(&GLOBAL_QUEUE).is_some() {
+        if Lazy::get(&GLOBAL_QUEUE).is_some() {
             panic!("programming error: global queue already initialized!");
         }
 
@@ -97,19 +97,22 @@ impl GlobalQueue {
                 false
             };
 
-        let local = Arc::new(
-            LocalQueue {
-                stealing_from_others,
-
+        let local =
+            Arc::new(LocalQueue {
                 id: unique_id(),
                 worker: Worker::<Runnable>::new(1024),
+                stealing_from_others,
+
                 active: Cell::new(false),
 
                 event: Rc::new(
                     LocalManualResetEvent::new(false)
                 ),
-            }
-        );
+
+                backlogs: FastCounter::new(),
+                idle: Cell::new(true),
+            });
+
         self.locals.insert( local.id, local.clone() )
             .unwrap();
 
@@ -141,6 +144,11 @@ pub struct LocalQueue {
 
     /// Whether allows to stealing task from others LocalQueue ?
     pub(crate) stealing_from_others: bool,
+
+    // pref
+    idle: Cell<bool>,
+    backlogs: FastCounter,
+
 }
 
 impl Drop for LocalQueue {
@@ -156,16 +164,97 @@ impl Drop for LocalQueue {
 }
 
 impl LocalQueue {
+    /* ===== read-only Getters ===== */
     pub fn id(&self) -> u128 {
         self.id
+    }
+    pub fn idle(&self) -> bool {
+        self.idle.get()
+    }
+    pub fn backlogs(&self) -> u128 {
+        self.backlogs.count()
+    }
+
+    /// Ticks this LocalQueue.
+    /// running until the queue exhausted.
+    pub fn tick(&self) {
+        self.idle.set(false);
+        scopeguard::defer!({
+            self.idle.set(true);
+        });
+
+        // handle a bulk of Runnable
+        while let Some(runnable) = self.pop() {
+            if let Err(any_err) =
+                // if possible (panic="unwind"), catch all panic from Runnable, so we can prevent worker thread exited unexpectedly.
+                std::panic::catch_unwind(||{
+                    runnable.run();
+                })
+            {
+                let thr = std::thread::current();
+                log::error!(
+                    "worker thread ({thr:?}): 'Runnable' panic: error={} | typeid={:?}",
+                    any_fmt(&any_err),
+                    any_err.type_id(),
+                );
+            }
+        }
+    }
+
+    pub async fn run(
+        &self,
+        idle_timeout: Option<Duration>
+    ) {
+        self.active.set(true);
+        scopeguard::defer!({
+            self.active.set(false);
+        });
+
+        let mut running: bool = true;
+
+        while running {
+            // subscribe
+            let local_evt = async {
+                self.event.wait().await;
+                self.event.reset();
+                true
+            };
+            let global_evt = async {
+                GLOBAL_QUEUE.wait().await;
+                true
+            };
+            let evt = local_evt.or(global_evt);
+
+            // Ticks this local queue
+            self.tick();
+
+            // wait now, so that when we get woken up, we *know* that something happened to the local-queue or global-queue.
+            running = evt.or(async {
+                if let Some(t) = idle_timeout {
+                    async_io::Timer::after(t).await;
+                    false
+                } else {
+                    async_io::Timer::never().await;
+                    true
+                }
+            }).await;
+        }
     }
 
     /// 1. Pops a task from this LocalQueue itself.
     /// 2. if this LocalQueue is empty, then try stealing task from other local queues (if allowed).
     /// 3. if all others LocalQueue is still empty (or disallowed to stealing from others), then fallback to stealing task from GlobalQueue anyway.
     pub fn pop(&self) -> Option<Runnable> {
-        self.worker.pop()
-            .or_else(|| { self.steal_and_pop() })
+        let maybe = self.worker.pop()
+            .or_else(|| { self.steal_and_pop() });
+
+        if maybe.is_some() {
+            if self.backlogs.count() > 0 {
+                self.backlogs.decr();
+            }
+        }
+
+        maybe
     }
 
     /// Pushes an item to the local queue, falling back to the global queue if the local queue is full.
@@ -178,6 +267,8 @@ impl LocalQueue {
             // notify the worker thread for new runnable
             self.event.set();
         }
+
+        self.backlogs.incr();
     }
 
     /// Steals a whole batch and pops one.
