@@ -1,12 +1,19 @@
-use crate::{AtomicU128, Relaxed};
+use crate::{Lazy, AtomicU128, Relaxed};
 
 /// A write-mostly, read-rarely counter
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct FastCounter {
     counter: AtomicU128,
 }
-
 impl FastCounter {
+    pub const fn new() -> Self {
+        Self::from_u128(0)
+    }
+    pub const fn from_u128(n: u128) -> Self {
+        let counter = AtomicU128::new(n);
+        Self { counter }
+    }
+
     /// Increment the counter, and returns current value
     #[inline(always)]
     pub fn incr(&self) -> u128 {
@@ -50,11 +57,15 @@ impl FastCounter {
                     return Some(i);
                 },
                 Err(_) => {
-                    log::warn!("fast counter: compare exchange failed. (update={op}, iterations={i})");
+                    let mut lv = log::Level::Debug;
+                    if i%100 == 0 {
+                        lv = log::Level::Warn;
+                    }
+                    log::log!(lv, "fast counter: compare exchange failed. (update={op}, iterations={i})");
                 }
             }
 
-            if i > 10 {
+            if i > 1000 {
                 break;
             }
         }
@@ -68,3 +79,45 @@ impl FastCounter {
         self.counter.load(Relaxed)
     }
 }
+
+impl Default for FastCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl From<u128> for FastCounter {
+    fn from(n: u128) -> Self {
+        Self::from_u128(n)
+    }
+}
+
+/// generates Unique ID for specified name space.
+pub fn namespace_unique_id(ns: impl ToString) -> u128 {
+    static CTRS: Lazy<scc::HashMap<String, FastCounter>> = Lazy::new(scc::HashMap::new);
+
+    let ctr =
+        CTRS.entry(ns.to_string())
+        .or_insert_with(FastCounter::new);
+    let ctr = ctr.get();
+
+    loop {
+        let prev = ctr.count();
+        let id = ctr.incr();
+        if id != prev {
+            return id;
+        }
+    }
+}
+
+/// generates ordered per-process-uniquely ID
+pub fn unique_id() -> u128 {
+    static GLOBAL_NS: Lazy<String> =
+        Lazy::new(||{
+            let rand = fastrand::u128(..);
+            let pid = std::process::id();
+            format!("__GLOBAL_NAME_SPACE_{pid}_{rand}")
+        });
+
+    namespace_unique_id(&*GLOBAL_NS)
+}
+

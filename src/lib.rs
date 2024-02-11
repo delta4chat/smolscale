@@ -10,7 +10,6 @@
 
 use async_compat::CompatExt;
 use backtrace::Backtrace;
-use fastcounter::FastCounter;
 use futures_lite::prelude::*;
 use once_cell::sync::{Lazy, OnceCell};
 use std::io::Write;
@@ -28,33 +27,54 @@ use portable_atomic::{
     Ordering::Relaxed
 };
 
-mod fastcounter;
+pub mod fastcounter;
+pub use fastcounter::*;
+
 pub mod immortal;
+pub use immortal::*;
+
+pub mod reaper;
+pub use reaper::*;
+
 mod new_executor;
 mod queues;
-pub mod reaper;
 
-//static CHANGE_THRESH: u32 = 10;
-static MONITOR_MS: u64 = 500;
+//pub static CHANGE_THRESH: u32 = 10;
 
-static MAX_THREADS: AtomicU128 = AtomicU128::new(20);
+static POLL_COUNT: FastCounter = FastCounter::new();
+static ACTIVE_TASKS: FastCounter = FastCounter::new();
+static FUTURES_BEING_POLLED: FastCounter = FastCounter::new();
 
-static POLL_COUNT: Lazy<FastCounter> = Lazy::new(Default::default);
+pub static MIN_THREADS: u128 = 1;
+static MAX_THREADS: Lazy<AtomicU128> = Lazy::new(||{
+    let mut max = num_cpus::get() as u128;
+    max *= 10;
 
-static THREAD_MAP: Lazy<scc::HashMap<u128, std::thread::JoinHandle<()>>> = Lazy::new(|| { scc::HashMap::new() });
-static THREAD_SPAWN_LOCK: Lazy<parking_lot::Mutex<()>> = Lazy::new(|| { parking_lot::Mutex::new(()) });
+    if max < 20 {
+        max = 20;
+    }
+
+    AtomicU128::new(max)
+});
+
+static THREAD_MAP: Lazy<scc::HashMap<u128, std::thread::JoinHandle<()>>> = Lazy::new(scc::HashMap::new);
+static THREAD_SPAWN_LOCK: Lazy<parking_lot::Mutex<()>> = Lazy::new(||{ parking_lot::Mutex::new(()) });
 
 static MONITOR: OnceCell<std::thread::JoinHandle<()>> = OnceCell::new();
+pub static MONITOR_INTERVAL: Duration =
+    Duration::from_millis(500);
 
 static SINGLE_THREAD: AtomicBool = AtomicBool::new(false);
 
-static SMOLSCALE_USE_AGEX: Lazy<bool> = Lazy::new(|| {
-    std::env::var("SMOLSCALE_USE_AGEX").is_ok()
-});
+pub static SMOLSCALE_USE_AGEX: Lazy<bool> =
+    Lazy::new(|| {
+        std::env::var("SMOLSCALE_USE_AGEX").is_ok()
+    });
 
-static SMOLSCALE_PROFILE: Lazy<bool> = Lazy::new(|| {
-    std::env::var("SMOLSCALE_PROFILE").is_ok()
-});
+pub static SMOLSCALE_PROFILE: Lazy<bool> =
+    Lazy::new(|| {
+        std::env::var("SMOLSCALE_PROFILE").is_ok()
+    });
 
 /// [deprecated] Irrevocably puts smolscale into single-threaded mode.
 #[deprecated]
@@ -65,8 +85,8 @@ pub fn permanently_single_threaded() {
 
 /// set maximum number of worker threads
 pub fn set_max_threads(mut max: u128) {
-    if max == 0 {
-        max = 1;
+    if max < MIN_THREADS {
+        max = MIN_THREADS;
     }
     MAX_THREADS.store(max, Relaxed);
 }
@@ -103,9 +123,11 @@ fn start_monitor() {
 }
 
 fn monitor_loop() {
-    if *SMOLSCALE_USE_AGEX {
-        //return;
-    }
+    use std::thread::sleep;
+
+    if *SMOLSCALE_USE_AGEX { return; }
+    log::trace!("monitor started");
+
     fn start_thread(exitable: bool, process_io: bool) {
         let _lock = THREAD_SPAWN_LOCK.lock();
 
@@ -117,8 +139,8 @@ fn monitor_loop() {
             return;
         }
 
-        static THREAD_ID: Lazy<FastCounter> = Lazy::new(Default::default);
-        let idx: u128 = THREAD_ID.incr();
+        let idx: u128 =
+            namespace_unique_id("smolscale2-thread-id");
 
         let thread = std::thread::Builder::new()
             .name(
@@ -137,15 +159,13 @@ fn monitor_loop() {
                 let future = async {
                     // let run_local = local_exec.run(futures_lite::future::pending::<()>());
                     if exitable {
-                        new_executor::run_local_queue()
-                            .or(async {
-                                async_io::Timer::after(
-                                    Duration::from_secs(5)
-                                ).await;
-                            }).await;
+                        new_executor::run_local_queue(
+                            Some(Duration::from_secs(9))
+                        ).await;
                     } else {
-                        new_executor::run_local_queue()
-                            .await;
+                        new_executor::run_local_queue(
+                            None
+                        ).await;
                     };
                 }
                 .compat();
@@ -160,22 +180,23 @@ fn monitor_loop() {
 
         THREAD_MAP.insert(idx, thread).expect("cannot add spawned worker thread to global list of join handles");
     }
+
+    let mut threads = num_cpus::get();
     if SINGLE_THREAD.load(Relaxed) || std::env::var("SMOLSCALE_SINGLE").is_ok() {
+        threads = 1;
+    }
+
+    for _ in 0..threads {
         start_thread(false, true);
-        //return;
-    } else {
-        for _ in 0..num_cpus::get() {
-            start_thread(false, true);
-        }
     }
 
     std::thread::Builder::new()
         .name("sscale-watchdog".to_string())
         .spawn(|| {
-            std::thread::sleep(Duration::from_millis(MONITOR_MS));
+            sleep(MONITOR_INTERVAL);
             loop {
-                if running_threads() > 0 {
-                    std::thread::sleep(Duration::from_millis(MONITOR_MS));
+                if running_threads() >= MIN_THREADS {
+                    sleep(MONITOR_INTERVAL);
                     continue;
                 }
 
@@ -185,30 +206,35 @@ fn monitor_loop() {
         })
         .expect("cannot spawn panic safe thread");
 
+    if SINGLE_THREAD.load(Relaxed) {
+        return;
+    }
+
     // "Token bucket"
-    let mut token_bucket = 100;
+    let mut token_bucket: i8 = 100;
     for count in 0u64.. {
         if count % 100 == 0 && token_bucket < 100 {
             token_bucket += 1
         }
         new_executor::global_rebalance();
-        if SINGLE_THREAD.load(Relaxed) {
-            //return;
-        }
+
         #[cfg(not(feature = "preempt"))]
         {
-            std::thread::sleep(Duration::from_millis(MONITOR_MS));
+            sleep(MONITOR_INTERVAL);
         }
         #[cfg(feature = "preempt")]
         {
             let before_sleep = POLL_COUNT.count();
-            std::thread::sleep(Duration::from_millis(MONITOR_MS));
+            sleep(MONITOR_INTERVAL);
             let after_sleep = POLL_COUNT.count();
-            let running_tasks = FUTURES_BEING_POLLED.count();
-            let running_threads = running_threads();
-            if after_sleep == before_sleep
+
+            let running_tasks =
+                FUTURES_BEING_POLLED.count();
+            let running_workers = running_threads();
+
+            if after_sleep.abs_diff(before_sleep) < 2
                 && token_bucket > 0
-                && running_tasks >= running_threads
+                && running_tasks >= running_workers
             {
                 start_thread(true, false);
                 token_bucket -= 1;
@@ -228,7 +254,6 @@ pub fn spawn<T: Send + 'static>(
     future: impl Future<Output = T> + Send + 'static,
 ) -> async_executor::Task<T> {
     start_monitor();
-    log::trace!("monitor started");
     if *SMOLSCALE_USE_AGEX {
         async_global_executor::spawn(future)
     } else {
@@ -241,10 +266,6 @@ struct WrappedFuture<T, F: Future<Output = T>> {
     spawn_btrace: Option<Arc<Backtrace>>,
     fut: F,
 }
-
-static ACTIVE_TASKS: Lazy<FastCounter> = Lazy::new(Default::default);
-
-static FUTURES_BEING_POLLED: Lazy<FastCounter> = Lazy::new(Default::default);
 
 /// Returns the current number of active tasks.
 pub fn active_task_count() -> u128 {
@@ -299,8 +320,8 @@ impl<T, F: Future<Output = T> + 'static> WrappedFuture<T, F> {
     pub fn new(fut: F) -> Self {
         ACTIVE_TASKS.incr();
 
-        static TASK_ID: Lazy<FastCounter> = Lazy::new(Default::default);
-        let task_id = TASK_ID.incr();
+        let task_id =
+            namespace_unique_id("smolscale2-task-id");
 
         WrappedFuture {
             task_id,
