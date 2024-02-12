@@ -431,13 +431,12 @@ static PROFILE_MAP: Lazy<scc::HashMap<u128, (Arc<Backtrace>, Duration)>> = Lazy:
             vv.reverse();
             eprintln!("----- SMOLSCALE PROFILE -----");
             let mut tw = TabWriter::new(stderr());
-            writeln!(&mut tw, "INDEX\tTOTAL\tTASK ID\tCPU TIME\tBACKTRACE").unwrap();
-            for (count, (task_id, (bt, duration))) in vv.into_iter().enumerate() {
+            writeln!(&mut tw, "TASK ID\tCPU TIME\tBACKTRACE").unwrap();
+            for (task_id, info) in vv.into_iter() {
+                let (bt, duration) = info;
                 writeln!(
                     &mut tw,
-                    "{}\t{}\t{}\t{:?}\t{}",
-                    count,
-                    ACTIVE_TASKS.count(),
+                    "{}\t{:?}\t{}",
                     task_id,
                     duration,
                     {

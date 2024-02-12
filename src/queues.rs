@@ -105,7 +105,10 @@ impl GlobalQueue {
 
         let local =
             Arc::new(LocalQueue {
-                id: unique_id(),
+                id: namespace_unique_id(
+                    "smolscale2-localqueue-id"
+                ),
+
                 worker: Worker::<Runnable>::new(1024),
                 stealing_from_others,
 
