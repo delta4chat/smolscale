@@ -125,8 +125,9 @@ where
         );
 
     runnable.schedule();
-    global_rebalance();
-    tick_monitor();
+    if GLOBAL_QUEUE.queue.len() > running_threads() {
+        tick_monitor();
+    }
     task
 }
 

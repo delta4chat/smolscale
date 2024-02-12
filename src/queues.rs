@@ -14,10 +14,13 @@ use std::rc::Rc;
 
 use crate::*;
 
-pub static MIN_SFO_AMOUNT: Lazy<u128> =
+pub const SMOLSCALE2_ALLOW_SFO: Lazy<bool> =
     Lazy::new(||{
-        num_cpus::get_physical() as u128
+        std::env::var("SMOLSCALE2_ALLOW_SFO").is_ok()
     });
+
+pub static MIN_SFO_AMOUNT: Lazy<usize> =
+    Lazy::new(num_cpus::get_physical);
 
 pub static GLOBAL_QUEUE: Lazy<GlobalQueue> =
     Lazy::new(||{
@@ -35,7 +38,7 @@ pub struct GlobalQueue {
     pub(crate) locals:
         scc::TreeIndex<u128, Arc<LocalQueue>>,
 
-    queue: ConcurrentQueue<Runnable>,
+    pub(crate) queue: ConcurrentQueue<Runnable>,
     event: Event,
 
     sfo_amount: FastCounter,
@@ -47,7 +50,7 @@ impl GlobalQueue {
     /// Creates a new GlobalQueue.
     /// # Panics
     /// this constructor will panic if another GlobalQueue already initialized.
-    pub fn new(sfo: u128) -> Self {
+    pub fn new(sfo: usize) -> Self {
         if Lazy::get(&GLOBAL_QUEUE).is_some() {
             panic!("programming error: global queue already initialized!");
         }
@@ -419,7 +422,7 @@ impl LocalQueue {
     /// Steals a whole batch and pops one.
     fn steal_and_pop(&self) -> Option<Runnable> {
         // try stealing from other local queues
-        if self.stealing_from_others {
+        if *SMOLSCALE2_ALLOW_SFO&&self.stealing_from_others{
             let mut stealers = GLOBAL_QUEUE.stealers();
             fastrand::shuffle(&mut stealers);
 

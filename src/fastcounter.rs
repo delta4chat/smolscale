@@ -83,9 +83,15 @@ impl Default for FastCounter {
         Self::new()
     }
 }
+
 impl From<u128> for FastCounter {
     fn from(n: u128) -> Self {
         Self::from_u128(n)
+    }
+}
+impl From<usize> for FastCounter {
+    fn from(n: usize) -> Self {
+        Self::from_u128(n as u128)
     }
 }
 

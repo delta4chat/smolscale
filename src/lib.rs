@@ -22,7 +22,7 @@ use std::{
 use tabwriter::TabWriter;
 
 use portable_atomic::{
-    AtomicU128, AtomicBool,
+    AtomicU128, AtomicUsize, AtomicBool,
     Ordering::Relaxed
 };
 
@@ -46,16 +46,16 @@ static POLL_COUNT: FastCounter = FastCounter::new();
 static ACTIVE_TASKS: FastCounter = FastCounter::new();
 static FUTURES_BEING_POLLED: FastCounter = FastCounter::new();
 
-pub const MIN_THREADS: u128 = 1;
-static MAX_THREADS: Lazy<AtomicU128> = Lazy::new(||{
-    let mut max = num_cpus::get() as u128;
+pub const MIN_THREADS: usize = 1;
+static MAX_THREADS: Lazy<AtomicUsize> = Lazy::new(||{
+    let mut max = num_cpus::get();
     max *= 10;
 
     if max < 20 {
         max = 20;
     }
 
-    AtomicU128::new(max)
+    AtomicUsize::new(max)
 });
 
 pub(crate) static THREAD_MAP:
@@ -95,7 +95,7 @@ pub fn permanently_single_threaded() {
 }
 
 /// set maximum number of worker threads
-pub fn set_max_threads(mut max: u128) {
+pub fn set_max_threads(mut max: usize) {
     if max < MIN_THREADS {
         max = MIN_THREADS;
     }
@@ -103,7 +103,7 @@ pub fn set_max_threads(mut max: u128) {
 }
 
 /// Returns the number of running worker threads.
-pub fn running_threads() -> u128 {
+pub fn running_threads() -> usize {
     let mut running = 0;
     let mut to_remove = vec![];
 
@@ -160,7 +160,7 @@ pub(crate) fn any_fmt(
     if let Some(v) = any.downcast_ref::<&str>() {
         return v.to_string();
     }
-    if let Some(v)=any.downcast_ref::<std::io::Error>(){
+    if let Some(v) = any.downcast_ref::<std::io::Error>() {
         return format!("{:?}", v);
     }
 
@@ -193,8 +193,8 @@ fn monitor_loop() {
     fn start_thread(exitable: bool, process_io: bool) {
         let _lock = THREAD_SPAWN_LOCK.lock();
 
-        let current_threads: u128 = running_threads();
-        let max_threads: u128 = MAX_THREADS.load(Relaxed);
+        let current_threads: usize = running_threads();
+        let max_threads: usize = MAX_THREADS.load(Relaxed);
 
         if current_threads >= max_threads {
             log::info!("cannot spawn new worker thread: max threads ({max_threads}) exceeded");
@@ -306,9 +306,11 @@ fn monitor_loop() {
             resting();
             let after_sleep = POLL_COUNT.count();
 
-            let running_tasks =
+            let running_tasks: u128 =
                 FUTURES_BEING_POLLED.count();
-            let running_workers = running_threads();
+
+            let running_workers: u128 =
+                running_threads() as u128;
 
             if after_sleep.abs_diff(before_sleep) < 2
                 && token_bucket > 0
@@ -382,13 +384,13 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
             let start = Instant::now();
             let result = fut.poll(cx);
             let elapsed = start.elapsed();
-            let mut tuple =
+            let mut entry =
                 PROFILE_MAP
-                // scc::Entry
                 .entry(task_id)
-                .or_insert_with(|| (btrace.unwrap(), Duration::from_secs(0)))
-                // Tuple
-                .get_mut().to_owned();
+                .or_insert_with(|| {
+                    (btrace.unwrap(), Duration::new(0, 0) )
+                });
+            let mut tuple = entry.get_mut();
             tuple.1 += elapsed;
             result
         } else {
