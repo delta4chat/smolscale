@@ -32,7 +32,7 @@ impl FastCounter {
     fn _update(&self, add: bool) -> Option<usize> {
         let op = if add { "Add" } else { "Sub" };
 
-        for i in 0.. {
+        for i in 0..=1000 {
             let prev = self.count();
 
             let maybe_new =
@@ -44,7 +44,9 @@ impl FastCounter {
             let new = match maybe_new {
                 Some(v) => v,
                 None => {
-                    log::error!("fast counter: u128 overflow! (update={op}, iterations={i})");
+                    if add {
+                        log::error!("fast counter: u128 overflow! (update={op}, iterations={i})");
+                    }
                     return None;
                 }
             };
@@ -63,10 +65,6 @@ impl FastCounter {
                     }
                     log::log!(lv, "fast counter: compare exchange failed. (update={op}, iterations={i})");
                 }
-            }
-
-            if i > 1000 {
-                break;
             }
         }
 

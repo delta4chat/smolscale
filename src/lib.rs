@@ -36,7 +36,9 @@ pub mod reaper;
 pub use reaper::*;
 
 mod new_executor;
+
 mod queues;
+use queues::GLOBAL_QUEUE;
 
 //pub const CHANGE_THRESH: u32 = 10;
 
@@ -78,6 +80,11 @@ pub const SMOLSCALE_USE_AGEX: Lazy<bool> =
 pub const SMOLSCALE_PROFILE: Lazy<bool> =
     Lazy::new(|| {
         std::env::var("SMOLSCALE_PROFILE").is_ok()
+    });
+
+pub const SMOLSCALE2_SCHED_LB: Lazy<bool> =
+    Lazy::new(||{
+        std::env::var("SMOLSCALE2_SCHED_LB").is_ok()
     });
 
 /// [deprecated] Irrevocably puts smolscale into single-threaded mode.
@@ -275,8 +282,17 @@ fn monitor_loop() {
     // "Token bucket"
     let mut token_bucket: i8 = 100;
     for count in 0u64.. {
-        if count % 100 == 0 && token_bucket < 100 {
-            token_bucket += 1
+        // print debug info
+        if count % 10 == 0 {
+            let g = scc::ebr::Guard::new();
+            for (_, lq) in GLOBAL_QUEUE.locals.iter(&g){
+                log::info!("queue status: {lq:?}");
+            }
+            // guard dropping now
+        }
+
+        if count % 15 == 0 && token_bucket < 100 {
+            token_bucket += 1;
         }
         new_executor::global_rebalance();
 
@@ -362,15 +378,18 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
         let task_id = self.task_id;
         let btrace = self.spawn_btrace.as_ref().map(Arc::clone);
         let fut = unsafe { self.map_unchecked_mut(|v| &mut v.fut) };
-        if *SMOLSCALE_PROFILE && fastrand::u64(0..100) == 0 {
+        if *SMOLSCALE_PROFILE {
             let start = Instant::now();
             let result = fut.poll(cx);
             let elapsed = start.elapsed();
-            let mut entry = PROFILE_MAP
+            let mut tuple =
+                PROFILE_MAP
+                // scc::Entry
                 .entry(task_id)
                 .or_insert_with(|| (btrace.unwrap(), Duration::from_secs(0)))
+                // Tuple
                 .get_mut().to_owned();
-            entry.1 += elapsed * 100;
+            tuple.1 += elapsed;
             result
         } else {
             fut.poll(cx)

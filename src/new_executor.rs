@@ -55,8 +55,13 @@ where
 
         let guard = scc::ebr::Guard::new();
         for (_, this) in locals.iter(&guard) {
+            log::debug!("scanning {:?}", &this);
+
             // ignore all inactive LocalQueue
             if ! this.active() { continue; }
+
+            // ignore all busy LocalQueue
+            if ! this.idle() { continue; }
 
             let selected = match maybe_selected {
                 Some(ref v) => v.clone(),
@@ -67,51 +72,46 @@ where
             };
 
             // Find the most idle worker thread, as it has less work than the others.
-
-            if this.worker.is_empty() && !selected.worker.is_empty() {
+            if this.cpu_usage() > selected.cpu_usage() {
+                continue;
+            }
+            if this.stress() < selected.stress() {
                 maybe_selected = Some( this.clone() );
                 continue;
             }
 
-            if this.backlogs() < selected.backlogs() {
-                maybe_selected = Some( this.clone() );
-                continue;
-            }
-            if this.workload() < selected.workload() {
-                maybe_selected = Some( this.clone() );
-                continue;
-            }
-            if this.cpu_usage() < selected.cpu_usage() {
-                maybe_selected = Some( this.clone() );
-                continue;
-            }
-
+            continue;
             // normally useless
-            if this.worker.spare_capacity() > selected.worker.spare_capacity() {
+            if
+                ( this.worker.is_empty() && !selected.worker.is_empty() ) &&
+                this.worker.spare_capacity() > selected.worker.spare_capacity() &&
+                this.worker.capacity() > selected.worker.capacity()
+            {
                 maybe_selected = Some( this.clone() );
                 continue;
             }
-            if this.worker.capacity() > selected.worker.capacity() {
-                maybe_selected = Some( this.clone() );
-                continue;
-            }               
         } // for (_, this) in locals.iter()
         core::mem::drop(guard);
 
         // check if selected one
         if let Some(selected) = maybe_selected {
-            log::debug!("lb_scheduler: scanned, pushed to {}", selected.id());
+            log::info!("lb_scheduler: scanned, pushed to {:#?}", &selected);
             selected.push(runnable);
         } else {
-            log::debug!("lb_scheduler: fallback to old_scheduler.");
+            log::info!("lb_scheduler: pushed to GlobalQueue");
+            GLOBAL_QUEUE.push(runnable);
+
+            /*
+            log::info!("lb_scheduler: fallback to old_scheduler.");
             old_scheduler(runnable);
+            */
         }
     }
 
-    static SMOLSCALE2_SCHED_LB: Lazy<bool> =
-        Lazy::new(||{
-            std::env::var("SMOLSCALE2_SCHED_LB").is_ok()
-        });
+    // the "simple" scheduler, just push to GlobalQueue.
+    fn simple_scheduler(runnable: Runnable) {
+        GLOBAL_QUEUE.push(runnable);
+    }
 
     let (runnable, task) =
         async_task::spawn(
@@ -119,11 +119,13 @@ where
             if *SMOLSCALE2_SCHED_LB {
                 lb_scheduler
             } else {
-                old_scheduler
+                //old_scheduler
+                simple_scheduler
             }
         );
 
     runnable.schedule();
+    global_rebalance();
     tick_monitor();
     task
 }

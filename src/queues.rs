@@ -117,6 +117,7 @@ impl GlobalQueue {
 
                 backlogs: FastCounter::new(),
                 cpu_usage: scc::TreeIndex::new(),
+                idle: Cell::new(true),
             });
 
         self.locals.insert( local.id, local.clone() )
@@ -133,7 +134,6 @@ impl GlobalQueue {
 }
 
 /// A thread-local queue, bound to GLOBAL_QUEUE.
-#[derive(Debug)]
 pub struct LocalQueue {
     /// unique identifier of this LocalQueue.
     /// (private, read-only field)
@@ -155,6 +155,7 @@ pub struct LocalQueue {
     // pref
     backlogs: FastCounter,
     cpu_usage: scc::TreeIndex<Instant, f64>,
+    idle: Cell<bool>,
 }
 
 impl Drop for LocalQueue {
@@ -169,6 +170,24 @@ impl Drop for LocalQueue {
     }
 }
 
+impl core::fmt::Debug for LocalQueue {
+    fn fmt(&self, f: &mut core::fmt::Formatter)
+        -> Result<(), core::fmt::Error>
+    {
+        let g = scc::ebr::Guard::new();
+        f.debug_struct("LocalQueue")
+            .field("EPOCH", &Self::EPOCH)
+            .field("id", &self.id())
+            .field("active", &self.active())
+            .field("idle", &self.idle.get())
+            .field("backlogs", &self.backlogs.count())
+            .field("cpu_usage",
+                   &self.cpu_usage.iter(&g).map(|(_,v)|*v).collect::<Vec<f64>>().pop().unwrap_or(f64::NAN)
+            )
+            .finish()
+    }
+}
+
 impl LocalQueue {
     // within ten minutes
     const EPOCH: Duration = Duration::from_secs(600);
@@ -177,8 +196,18 @@ impl LocalQueue {
     pub fn id(&self) -> u128 {
         self.id
     }
-    pub fn backlogs(&self) -> u128 {
-        self.backlogs.count()
+    pub fn idle(&self) -> bool {
+        let val = self.idle.get();
+        log::debug!(
+            "LocalQueue {} = {}",
+            self.id,
+            if val {
+                "IDLE"
+            } else {
+                "WORKING"
+            }
+        );
+        val
     }
     pub fn active(&self) -> bool {
         self.thread().is_some()
@@ -219,7 +248,6 @@ impl LocalQueue {
             avg
         }
     }
-
     fn _cpu_usages_within_epoch(&self) -> Vec<f64> {
         let mut usages = vec![];
         let mut to_remove = vec![];
@@ -243,18 +271,33 @@ impl LocalQueue {
     }
 
     /// how many works done within this epoch?
-    pub fn workload(&self) -> usize {
-        let wl = self._cpu_usages_within_epoch().len();
-        log::debug!("LocalQueue {}: workload={wl}", self.id);
-        wl
+    fn workload(&self) -> usize {
+        self._cpu_usages_within_epoch().len()
+    }
+    fn backlogs(&self) -> u128 {
+        self.backlogs.count()
+    }
+
+    /// short-term and long-term workload stress
+    pub fn stress(&self) -> u128 {
+        let wl = self.workload() as u128;
+        let bl = self.backlogs();
+
+        log::debug!("LocalQueue {}: workload={wl}, backlogs={bl}", self.id);
+        wl + bl
     }
 
     /// Ticks this LocalQueue.
     /// running until the queue exhausted.
     pub fn tick(&self) {
+        self.idle.set(false);
+        scopeguard::defer!({
+            self.idle.set(true);
+        });
+
         // handle a bulk of Runnable
         while let Some(runnable) = self.pop() {
-            let _ = self._record_cpu_usage();
+            self._record_cpu_usage();
 
             if let Err(any_err) =
                 // if possible (panic="unwind"), catch all panic from Runnable, so we can prevent worker thread exited unexpectedly.
@@ -271,14 +314,20 @@ impl LocalQueue {
             }
         }
     }
-    fn _record_cpu_usage(&self) -> anyhow::Result<()> {
+
+    fn _get_cpu_usage() -> anyhow::Result<f64> {
         let mut stat = perfmon::cpu::ThreadStat::cur()?;
         let usage: f64 = stat.cpu()?;
 
+        Ok(usage)
+    }
+
+    fn _record_cpu_usage(&self) {
+        let usage: f64 =
+            Self::_get_cpu_usage().unwrap_or(1.0);
+
         let now = Instant::now();
         let _ = self.cpu_usage.insert(now, usage);
-
-        Ok(())
     }
 
     /// if `idle_timeout` is None, then running this LocalQueue forever
@@ -321,17 +370,19 @@ impl LocalQueue {
 
             // Ticks this local queue
             self.tick();
+            if fastrand::u8(..) < 5 {
+                futures_lite::future::yield_now().await;
+            }
 
             // wait now, so that when we get woken up, we *know* that something happened to the local-queue or global-queue.
-            running = evt.or(async {
-                if let Some(t) = idle_timeout {
+            if let Some(t) = idle_timeout {
+                running = evt.or(async {
                     async_io::Timer::after(t).await;
                     false
-                } else {
-                    async_io::Timer::never().await;
-                    true
-                }
-            }).await;
+                }).await;
+            } else {
+                evt.await;
+            }
         }
     }
 
@@ -360,7 +411,6 @@ impl LocalQueue {
             self.event.set();
             self.backlogs.incr();
         }
-        log::trace!("finish push()");
     }
 
     /// Steals a whole batch and pops one.
@@ -379,7 +429,17 @@ impl LocalQueue {
                         }
                     )
                 {
-                    let count = count.checked_add(1).unwrap_or(count);
+                    let count =
+                        count.checked_add(1)
+                        .unwrap_or(count);
+
+                    GLOBAL_QUEUE.locals.peek_with(
+                        &id,
+                        |_, lq| {
+                            lq.backlogs.decr();
+                        }
+                    );
+
                     log::debug!("stolen {count} tasks from {id} to {}", self.id);
                     return Some(val);
                 }
