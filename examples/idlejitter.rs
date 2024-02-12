@@ -1,18 +1,16 @@
-use std::{
-    sync::atomic::AtomicUsize,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
+use portable_atomic::{AtomicUsize, Ordering},
 
 fn main() {
     // smolscale::permanently_single_threaded();
-    smolscale::block_on(async move {
+    smolscale2::block_on(async move {
         static CONTENDER: AtomicUsize = AtomicUsize::new(0);
-        for _ in 0..1000 {
-            smolscale::spawn(async move {
+        for _ in 0..100000 {
+            smolscale2::spawn(async move {
                 loop {
                     futures_lite::future::yield_now().await;
                     for _ in 0..1000 {
-                        CONTENDER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        CONTENDER.fetch_add(1, Ordering::SeqCst);
                     }
                 }
             })
@@ -31,3 +29,4 @@ fn main() {
         }
     })
 }
+

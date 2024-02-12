@@ -27,17 +27,17 @@ pub async fn run_local_queue(
 }
 
 /// Spawns a task
-pub fn spawn<F>(future: F) -> async_task::Task<F::Output>
+pub fn spawn<F>(future: F)
+    -> async_task::Task<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-
     // the original scheduler.
     fn old_scheduler(runnable: Runnable) {
         // if the current thread is not processing tasks, we go to the global queue directly.
         let lq_active =
-            LOCAL_QUEUE.with(|lq|{ lq.active.get() });
+            LOCAL_QUEUE.with(|lq|{ lq.active() });
         if !lq_active || fastrand::usize(0..512) == 0 {
             GLOBAL_QUEUE.push(runnable);
             log::trace!("old_scheduler: pushed to global queue");
@@ -50,46 +50,56 @@ where
     // next-generation scheduler with load balancing
     fn lb_scheduler(runnable: Runnable) {
         let locals = &GLOBAL_QUEUE.locals;
-        if let Some(entry) = locals.first_entry() {
-            let mut selected: Arc<LocalQueue> =
-                entry.get().clone();
+        let mut maybe_selected =
+            Option::<Arc<LocalQueue>>::None;
 
-            // prevent deadlocks in scc::HashMap
-            core::mem::drop(entry);
+        let guard = scc::ebr::Guard::new();
+        for (_, this) in locals.iter(&guard) {
+            // ignore all inactive LocalQueue
+            if ! this.active() { continue; }
 
-            log::trace!("lb_scheduler: scanning");
-            locals.scan(
-                |_, this|{
-                    // Find the most idle worker thread, as it has less work than the others.
-
-                    if this.idle() {
-                        if ! selected.idle() {
-                            selected = this.clone();
-                            return;
-                        }
-                    }
-                    if this.worker.is_empty() {
-                        if ! selected.worker.is_empty(){
-                            selected = this.clone();
-                            return;
-                        }
-                    }
-
-                    if this.backlogs() < selected.backlogs() {
-                        selected = this.clone();
-                        return;
-                    }
-                    if this.worker.spare_capacity() > selected.worker.spare_capacity() {
-                        selected = this.clone();
-                        return;
-                    }
-                    if this.worker.capacity() > selected.worker.capacity() {
-                        selected = this.clone();
-                        return;
-                    }
-                        
+            let selected = match maybe_selected {
+                Some(ref v) => v.clone(),
+                None => {
+                    maybe_selected = Some(this.clone());
+                    continue;
                 }
-            );
+            };
+
+            // Find the most idle worker thread, as it has less work than the others.
+
+            if this.worker.is_empty() && !selected.worker.is_empty() {
+                maybe_selected = Some( this.clone() );
+                continue;
+            }
+
+            if this.backlogs() < selected.backlogs() {
+                maybe_selected = Some( this.clone() );
+                continue;
+            }
+            if this.workload() < selected.workload() {
+                maybe_selected = Some( this.clone() );
+                continue;
+            }
+            if this.cpu_usage() < selected.cpu_usage() {
+                maybe_selected = Some( this.clone() );
+                continue;
+            }
+
+            // normally useless
+            if this.worker.spare_capacity() > selected.worker.spare_capacity() {
+                maybe_selected = Some( this.clone() );
+                continue;
+            }
+            if this.worker.capacity() > selected.worker.capacity() {
+                maybe_selected = Some( this.clone() );
+                continue;
+            }               
+        } // for (_, this) in locals.iter()
+        core::mem::drop(guard);
+
+        // check if selected one
+        if let Some(selected) = maybe_selected {
             log::debug!("lb_scheduler: scanned, pushed to {}", selected.id());
             selected.push(runnable);
         } else {
@@ -98,14 +108,23 @@ where
         }
     }
 
+    static SMOLSCALE2_SCHED_LB: Lazy<bool> =
+        Lazy::new(||{
+            std::env::var("SMOLSCALE2_SCHED_LB").is_ok()
+        });
+
     let (runnable, task) =
         async_task::spawn(
             future,
-            //old_scheduler
-            lb_scheduler
+            if *SMOLSCALE2_SCHED_LB {
+                lb_scheduler
+            } else {
+                old_scheduler
+            }
         );
 
     runnable.schedule();
+    tick_monitor();
     task
 }
 

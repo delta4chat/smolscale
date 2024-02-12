@@ -12,9 +12,8 @@ use async_compat::CompatExt;
 use backtrace::Backtrace;
 use futures_lite::prelude::*;
 use once_cell::sync::{Lazy, OnceCell};
-use std::io::Write;
 use std::{
-    io::stderr,
+    io::{Write, stderr},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -39,13 +38,13 @@ pub use reaper::*;
 mod new_executor;
 mod queues;
 
-//pub static CHANGE_THRESH: u32 = 10;
+//pub const CHANGE_THRESH: u32 = 10;
 
 static POLL_COUNT: FastCounter = FastCounter::new();
 static ACTIVE_TASKS: FastCounter = FastCounter::new();
 static FUTURES_BEING_POLLED: FastCounter = FastCounter::new();
 
-pub static MIN_THREADS: u128 = 1;
+pub const MIN_THREADS: u128 = 1;
 static MAX_THREADS: Lazy<AtomicU128> = Lazy::new(||{
     let mut max = num_cpus::get() as u128;
     max *= 10;
@@ -57,21 +56,26 @@ static MAX_THREADS: Lazy<AtomicU128> = Lazy::new(||{
     AtomicU128::new(max)
 });
 
-static THREAD_MAP: Lazy<scc::HashMap<u128, std::thread::JoinHandle<()>>> = Lazy::new(scc::HashMap::new);
+pub(crate) static THREAD_MAP:
+    Lazy<scc::TreeIndex<
+            u128,
+            Arc<std::thread::JoinHandle<()>>
+    >> = Lazy::new(scc::TreeIndex::new);
 static THREAD_SPAWN_LOCK: Lazy<parking_lot::Mutex<()>> = Lazy::new(||{ parking_lot::Mutex::new(()) });
 
-static MONITOR: OnceCell<std::thread::JoinHandle<()>> = OnceCell::new();
-pub static MONITOR_INTERVAL: Duration =
-    Duration::from_millis(500);
+pub(crate) static MONITOR: OnceCell<std::thread::JoinHandle<()>> = OnceCell::new();
+pub const MONITOR_INTERVAL: Duration =
+    // this long-interval is completely fine due to moniter_loop() uses 'park_timeout' for immediately woken if necessary
+    Duration::from_secs(1);
 
 static SINGLE_THREAD: AtomicBool = AtomicBool::new(false);
 
-pub static SMOLSCALE_USE_AGEX: Lazy<bool> =
+pub const SMOLSCALE_USE_AGEX: Lazy<bool> =
     Lazy::new(|| {
         std::env::var("SMOLSCALE_USE_AGEX").is_ok()
     });
 
-pub static SMOLSCALE_PROFILE: Lazy<bool> =
+pub const SMOLSCALE_PROFILE: Lazy<bool> =
     Lazy::new(|| {
         std::env::var("SMOLSCALE_PROFILE").is_ok()
     });
@@ -96,18 +100,22 @@ pub fn running_threads() -> u128 {
     let mut running = 0;
     let mut to_remove = vec![];
 
-    THREAD_MAP.scan(|idx, join| {
-        if join.is_finished() {
-            let name = join.thread().name();
-            log::warn!("worker thread (id={idx}, name={name:?}) exited!");
-            to_remove.push(*idx);
-        } else {
-            running += 1;
+    {
+        let guard = scc::ebr::Guard::new();
+        for (idx, join) in THREAD_MAP.iter(&guard) {
+            if join.is_finished() {
+                let name = join.thread().name();
+                log::warn!("worker thread (id={idx}, name={name:?}) exited!");
+                to_remove.push(*idx);
+            } else {
+                running += 1;
+            }
         }
-    });
+        // guard dropping here
+    }
 
-    for rm_idx in to_remove {
-        THREAD_MAP.remove(&rm_idx);
+    for rm_idx in to_remove.iter() {
+        THREAD_MAP.remove(rm_idx);
     }
 
     running
@@ -120,6 +128,19 @@ fn start_monitor() {
             .spawn(monitor_loop)
             .expect("cannot spawn monitor thread")
     });
+}
+
+
+/// tells the monitor something happening
+///
+/// # Panics
+/// this function will panics if no monitor thread running.
+pub fn tick_monitor() {
+    if let Some(mon) = MONITOR.get() {
+        mon.thread().unpark();
+    } else {
+        panic!("fatal error: no running monitor!");
+    }
 }
 
 pub(crate) fn any_fmt(
@@ -137,6 +158,23 @@ pub(crate) fn any_fmt(
     }
 
     format!("{:?}", &any)
+}
+pub(crate) fn average<T>(set: &[T]) -> T
+where
+    T: Default + Copy + From<u64> +
+    core::ops::Add<Output=T> + core::ops::Div<Output=T>
+{
+    let len = set.len();
+    if len > 0 {
+        let len: T = T::from(len as u64);
+        let mut sum: T = Default::default();
+        for n in set.iter() {
+            sum = sum + *n;
+        }
+        sum / len
+    } else {
+        Default::default()
+    }
 }
 
 fn monitor_loop() {
@@ -173,7 +211,7 @@ fn monitor_loop() {
                 });
 
                 // let local_exec = LEXEC.with(|v| Rc::clone(v));
-                let future = async {
+                let fut = async {
                     // let run_local = local_exec.run(futures_lite::future::pending::<()>());
                     if exitable {
                         new_executor::run_local_queue(
@@ -188,14 +226,16 @@ fn monitor_loop() {
                 .compat();
 
                 if process_io {
-                    async_io::block_on(future)
+                    async_io::block_on(fut)
                 } else {
-                    futures_lite::future::block_on(future)
+                    futures_lite::future::block_on(fut)
                 }
             })
             .expect("cannot spawn worker thread");
 
-        THREAD_MAP.insert(idx, thread).expect("cannot add spawned worker thread to global list of join handles");
+        THREAD_MAP.insert(
+            idx, Arc::new(thread)
+        ).expect("cannot add spawned worker thread to global list of join handles");
     }
 
     let mut threads = num_cpus::get();
@@ -227,6 +267,11 @@ fn monitor_loop() {
         return;
     }
 
+    // sleep or woken
+    fn resting() {
+        std::thread::park_timeout(MONITOR_INTERVAL);
+    }
+
     // "Token bucket"
     let mut token_bucket: i8 = 100;
     for count in 0u64.. {
@@ -237,12 +282,12 @@ fn monitor_loop() {
 
         #[cfg(not(feature = "preempt"))]
         {
-            sleep(MONITOR_INTERVAL);
+            resting();
         }
         #[cfg(feature = "preempt")]
         {
             let before_sleep = POLL_COUNT.count();
-            sleep(MONITOR_INTERVAL);
+            resting();
             let after_sleep = POLL_COUNT.count();
 
             let running_tasks =
@@ -360,7 +405,7 @@ static PROFILE_MAP: Lazy<scc::HashMap<u128, (Arc<Backtrace>, Duration)>> = Lazy:
         .name("sscale-prof".into())
         .spawn(|| loop {
             let mut vv = vec![];
-            PROFILE_MAP.scan(|k, v| {
+            PROFILE_MAP.scan(|k, v|{
                 vv.push( (*k, v.clone()) );
             });
             vv.sort_unstable_by_key(|s| s.1 .1);

@@ -121,6 +121,11 @@ pub fn namespace_unique_id(ns: impl ToString) -> u128 {
     }
 }
 
+pub fn named_unique_id(name: &str) -> String {
+    let id = namespace_unique_id(&name);
+    format!("{name}://{id}")
+}
+
 /// generates ordered per-process-uniquely ID
 pub fn unique_id() -> u128 {
     namespace_unique_id(&*GLOBAL_NS)

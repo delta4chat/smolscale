@@ -6,9 +6,10 @@ use futures_intrusive::sync::LocalManualResetEvent;
 use st3::fifo::{Stealer, Worker};
 use concurrent_queue::ConcurrentQueue;
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use once_cell::sync::Lazy;
 
+use std::time::Instant;
 use std::rc::Rc;
 
 use crate::*;
@@ -32,7 +33,7 @@ pub static GLOBAL_QUEUE: Lazy<GlobalQueue> =
 #[derive(Debug)]
 pub struct GlobalQueue {
     pub(crate) locals:
-        scc::HashMap<u128, Arc<LocalQueue>>,
+        scc::TreeIndex<u128, Arc<LocalQueue>>,
 
     queue: ConcurrentQueue<Runnable>,
     event: Event,
@@ -54,7 +55,7 @@ impl GlobalQueue {
         Self {
             queue: ConcurrentQueue::unbounded(),
             sfo_amount: FastCounter::from(sfo),
-            locals: scc::HashMap::new(),
+            locals: scc::TreeIndex::new(),
             event: Event::new(),
         }
     }
@@ -63,11 +64,15 @@ impl GlobalQueue {
         -> Vec<(u128, Stealer<Runnable>)>
     {
         let mut x = vec![];
-        self.locals.scan(|id, local| {
+
+        let guard = scc::ebr::Guard::new();
+        for (id, local) in self.locals.iter(&guard) {
             x.push(
                 ( *id, local.worker.stealer() )
             );
-        });
+        }
+        core::mem::drop(guard);
+
         x
     }
 
@@ -82,6 +87,7 @@ impl GlobalQueue {
 
     /// Rebalances the executor.
     pub fn rebalance(&self) {
+        log::trace!("global queue: rebalance()");
         self.event.notify_relaxed(usize::MAX);
     }
 
@@ -103,14 +109,14 @@ impl GlobalQueue {
                 worker: Worker::<Runnable>::new(1024),
                 stealing_from_others,
 
-                active: Cell::new(false),
+                thread: RefCell::new(None),
 
                 event: Rc::new(
                     LocalManualResetEvent::new(false)
                 ),
 
                 backlogs: FastCounter::new(),
-                idle: Cell::new(true),
+                cpu_usage: scc::TreeIndex::new(),
             });
 
         self.locals.insert( local.id, local.clone() )
@@ -139,16 +145,16 @@ pub struct LocalQueue {
     /// event pub/sub
     pub(crate) event: Rc<LocalManualResetEvent>,
 
-    /// Whether this LocalQueue active?
-    pub(crate) active: Cell<bool>,
+    /// Whether this LocalQueue active and ready to handle tasks? and running by which thread?
+    pub(crate) thread:
+        RefCell<Option<std::thread::Thread>>,
 
     /// Whether allows to stealing task from others LocalQueue ?
     pub(crate) stealing_from_others: bool,
 
     // pref
-    idle: Cell<bool>,
     backlogs: FastCounter,
-
+    cpu_usage: scc::TreeIndex<Instant, f64>,
 }
 
 impl Drop for LocalQueue {
@@ -164,27 +170,92 @@ impl Drop for LocalQueue {
 }
 
 impl LocalQueue {
+    // within ten minutes
+    const EPOCH: Duration = Duration::from_secs(600);
+
     /* ===== read-only Getters ===== */
     pub fn id(&self) -> u128 {
         self.id
     }
-    pub fn idle(&self) -> bool {
-        self.idle.get()
-    }
     pub fn backlogs(&self) -> u128 {
         self.backlogs.count()
+    }
+    pub fn active(&self) -> bool {
+        self.thread().is_some()
+    }
+    pub fn thread(&self)
+        -> Option<std::thread::Thread>
+    {
+        if let Some(ref thr) = *self.thread.borrow() {
+            Some( thr.clone() )
+        } else {
+            None
+        }
+    }
+
+    /// CPU usage of this worker thread
+    pub fn cpu_usage(&self) -> f64 {
+        let usage_bits: Vec<u128> =
+            self._cpu_usages_within_epoch()
+            .iter()
+            .map(|x| { x.to_bits() as u128 })
+            .collect();
+
+        let avg_bits = average(&usage_bits);
+        let avg = f64::from_bits(
+            if avg_bits > (u64::MAX as u128) {
+                log::error!("overflow in LocalQueue.cpu_usage()");
+                u64::MAX
+            } else {
+                avg_bits as u64
+            }
+        );
+
+        log::debug!("LocalQueue {}: average cpu usage = {:?}", self.id, avg);
+
+        if avg.is_nan() {
+            f64::MAX
+        } else {
+            avg
+        }
+    }
+
+    fn _cpu_usages_within_epoch(&self) -> Vec<f64> {
+        let mut usages = vec![];
+        let mut to_remove = vec![];
+
+        let guard = scc::ebr::Guard::new();
+        for (ts, usage) in self.cpu_usage.iter(&guard) {
+            if ts.elapsed() > Self::EPOCH {
+                to_remove.push(*ts);
+            } else {
+                usages.push(*usage);
+            }
+        }
+        core::mem::drop(guard);
+
+        for key in to_remove.iter() {
+            self.cpu_usage.remove(key);
+        }
+
+        return usages;
+
+    }
+
+    /// how many works done within this epoch?
+    pub fn workload(&self) -> usize {
+        let wl = self._cpu_usages_within_epoch().len();
+        log::debug!("LocalQueue {}: workload={wl}", self.id);
+        wl
     }
 
     /// Ticks this LocalQueue.
     /// running until the queue exhausted.
     pub fn tick(&self) {
-        self.idle.set(false);
-        scopeguard::defer!({
-            self.idle.set(true);
-        });
-
         // handle a bulk of Runnable
         while let Some(runnable) = self.pop() {
+            let _ = self._record_cpu_usage();
+
             if let Err(any_err) =
                 // if possible (panic="unwind"), catch all panic from Runnable, so we can prevent worker thread exited unexpectedly.
                 std::panic::catch_unwind(||{
@@ -200,15 +271,38 @@ impl LocalQueue {
             }
         }
     }
+    fn _record_cpu_usage(&self) -> anyhow::Result<()> {
+        let mut stat = perfmon::cpu::ThreadStat::cur()?;
+        let usage: f64 = stat.cpu()?;
 
-    pub async fn run(
+        let now = Instant::now();
+        let _ = self.cpu_usage.insert(now, usage);
+
+        Ok(())
+    }
+
+    /// if `idle_timeout` is None, then running this LocalQueue forever
+    /// otherwise this method will exit if idle within the specified duration.
+    ///
+    /// # Panics
+    /// this method will panic if this LocalQueue already running by another thread
+    pub(crate) async fn run(
         &self,
         idle_timeout: Option<Duration>
     ) {
-        self.active.set(true);
+        // make easier to debug: prevent to running this parallels
+        if self.active() {
+            panic!("programming bug: this LocalQueue is already running!");
+        }
+
+        self.thread.replace(
+            Some( std::thread::current() )
+        );
         scopeguard::defer!({
-            self.active.set(false);
+            self.thread.replace(None);
         });
+
+        /* to processing tasks... */
 
         let mut running: bool = true;
 
@@ -245,16 +339,14 @@ impl LocalQueue {
     /// 2. if this LocalQueue is empty, then try stealing task from other local queues (if allowed).
     /// 3. if all others LocalQueue is still empty (or disallowed to stealing from others), then fallback to stealing task from GlobalQueue anyway.
     pub fn pop(&self) -> Option<Runnable> {
-        let maybe = self.worker.pop()
-            .or_else(|| { self.steal_and_pop() });
-
+        let maybe = self.worker.pop();
         if maybe.is_some() {
             if self.backlogs.count() > 0 {
                 self.backlogs.decr();
             }
         }
 
-        maybe
+        maybe.or_else(|| { self.steal_and_pop() })
     }
 
     /// Pushes an item to the local queue, falling back to the global queue if the local queue is full.
@@ -266,9 +358,9 @@ impl LocalQueue {
             log::trace!("LocalQueue {}: new task pushed locally", self.id);
             // notify the worker thread for new runnable
             self.event.set();
+            self.backlogs.incr();
         }
-
-        self.backlogs.incr();
+        log::trace!("finish push()");
     }
 
     /// Steals a whole batch and pops one.
