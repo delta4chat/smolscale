@@ -68,21 +68,21 @@ static THREAD_SPAWN_LOCK: Lazy<parking_lot::Mutex<()>> = Lazy::new(||{ parking_l
 pub(crate) static MONITOR: OnceCell<std::thread::JoinHandle<()>> = OnceCell::new();
 pub const MONITOR_INTERVAL: Duration =
     // this long-interval is completely fine due to moniter_loop() uses 'park_timeout' for immediately woken if necessary
-    Duration::from_secs(1);
+    Duration::from_secs(10);
 
 static SINGLE_THREAD: AtomicBool = AtomicBool::new(false);
 
-pub const SMOLSCALE_USE_AGEX: Lazy<bool> =
+pub static SMOLSCALE_USE_AGEX: Lazy<bool> =
     Lazy::new(|| {
         std::env::var("SMOLSCALE_USE_AGEX").is_ok()
     });
 
-pub const SMOLSCALE_PROFILE: Lazy<bool> =
+pub static SMOLSCALE_PROFILE: Lazy<bool> =
     Lazy::new(|| {
         std::env::var("SMOLSCALE_PROFILE").is_ok()
     });
 
-pub const SMOLSCALE2_SCHED_LB: Lazy<bool> =
+pub static SMOLSCALE2_SCHED_LB: Lazy<bool> =
     Lazy::new(||{
         std::env::var("SMOLSCALE2_SCHED_LB").is_ok()
     });
@@ -378,19 +378,24 @@ impl<T, F: Future<Output = T>> Future for WrappedFuture<T, F> {
         });
 
         let task_id = self.task_id;
-        let btrace = self.spawn_btrace.as_ref().map(Arc::clone);
-        let fut = unsafe { self.map_unchecked_mut(|v| &mut v.fut) };
+        let bt = self.spawn_btrace.clone();
+
+        // 'self' moved here
+        let fut = unsafe {
+            self.map_unchecked_mut(|v| &mut v.fut)
+        };
         if *SMOLSCALE_PROFILE {
             let start = Instant::now();
             let result = fut.poll(cx);
             let elapsed = start.elapsed();
+
             let mut entry =
                 PROFILE_MAP
                 .entry(task_id)
                 .or_insert_with(|| {
-                    (btrace.unwrap(), Duration::new(0, 0) )
+                    ( bt.unwrap(), Duration::from_secs(0) )
                 });
-            let mut tuple = entry.get_mut();
+            let tuple = entry.get_mut();
             tuple.1 += elapsed;
             result
         } else {

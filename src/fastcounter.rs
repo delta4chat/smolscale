@@ -1,4 +1,4 @@
-use crate::{Lazy, AtomicU128, Relaxed};
+use crate::*;
 
 /// A write-mostly, read-rarely counter
 #[derive(Debug)]

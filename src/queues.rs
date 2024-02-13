@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use crate::*;
 
-pub const SMOLSCALE2_ALLOW_SFO: Lazy<bool> =
+pub static SMOLSCALE2_ALLOW_SFO: Lazy<bool> =
     Lazy::new(||{
         std::env::var("SMOLSCALE2_ALLOW_SFO").is_ok()
     });
@@ -360,6 +360,7 @@ impl LocalQueue {
         /* to processing tasks... */
 
         let mut running: bool = true;
+        let started = Instant::now();
 
         while running {
             // subscribe
@@ -375,9 +376,38 @@ impl LocalQueue {
             let evt = local_evt.or(global_evt);
 
             // Ticks this local queue
-            self.tick();
-            if fastrand::u8(..) < 5 {
+            let tick_elapsed = {
+                let start = Instant::now();
+                self.tick();
+                start.elapsed()
+            };
+
+            if tick_elapsed.as_millis() >= 1000 {
+                log::warn!("LocalQueue {}: tick() spends too much time! elapsed=<{:?}>", self.id, tick_elapsed);
+            } else {
+                log::trace!(
+                    "LocalQueue {}: tick() = time<{:?}>",
+                    self.id,
+                    tick_elapsed
+                );
+            }
+
+            // (with a chance of 10/1000) a half of workers will yield time to others.
+            if
+                // this avoid to yield too quickly
+                started.elapsed().subsec_millis() < 10 &&
+
+                // only yields half of total worker threads
+                (self.id % 2) == 0
+            {
+                let t = Instant::now();
                 futures_lite::future::yield_now().await;
+                let t = t.elapsed();
+                if t.as_millis() >= 500 {
+                    log::trace!("LocalQueue {}: yield_now() spends too much time! elapsed={t:?}", self.id);
+                } else {
+                    log::trace!("LocalQueue {}: yield_now() = time<{t:?}>", self.id);
+                }
             }
 
             // wait now, so that when we get woken up, we *know* that something happened to the local-queue or global-queue.
