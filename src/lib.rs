@@ -429,23 +429,23 @@ impl<T, F: Future<Output = T> + 'static> WrappedFuture<T, F> {
 static PROFILE_MAP: Lazy<scc::HashMap<u128, (Arc<Backtrace>, Duration)>> = Lazy::new(|| {
     std::thread::Builder::new()
         .name("sscale-prof".into())
-        .spawn(|| loop {
+        .spawn(|| while *SMOLSCALE_PROFILE {
+            std::thread::sleep(Duration::from_secs(10));
+
             let mut vv = vec![];
             PROFILE_MAP.scan(|k, v|{
                 vv.push( (*k, v.clone()) );
             });
             vv.sort_unstable_by_key(|s| s.1 .1);
             vv.reverse();
-            eprintln!("----- SMOLSCALE PROFILE -----");
+            eprintln!("----- SMOLSCALE TASK PROFILE -----");
             let mut tw = TabWriter::new(stderr());
-            writeln!(&mut tw, "TASK ID\tCPU TIME\tBACKTRACE").unwrap();
+            writeln!(&mut tw, "TASK ID\tUSED TIME\tBACKTRACE").unwrap();
             for (task_id, info) in vv.into_iter() {
                 let (bt, duration) = info;
                 writeln!(
                     &mut tw,
-                    "{}\t{:?}\t{}",
-                    task_id,
-                    duration,
+                    "{task_id}\t{duration:?}\t{}",
                     {
                         let s = format!("{:?}", bt);
                         format!(
@@ -463,10 +463,45 @@ static PROFILE_MAP: Lazy<scc::HashMap<u128, (Arc<Backtrace>, Duration)>> = Lazy:
                 .unwrap();
             }
             tw.flush().unwrap();
-            std::thread::sleep(Duration::from_secs(10));
-        })
-        .unwrap();
-    Default::default()
+            core::mem::drop(tw);
+
+            eprintln!("----- SMOLSCALE LOCALQUEUE PROFILE -----");
+            let mut tw = TabWriter::new(stderr());
+            writeln!(&mut tw, "QUEUE ID\tTHREAD\tSTATE\tCPU USAGE\tWORKLOAD\tBACKLOGS").unwrap();
+            {
+                let g = scc::ebr::Guard::new();
+                for (id, lq) in GLOBAL_QUEUE.locals.iter(&g) {
+                    let status =
+                        if lq.idle() {
+                            "IDLE"
+                        } else {
+                            "WORKING"
+                        };
+                    let thread =
+                        if let Some(thr) = lq.thread() {
+                            format!("{:?}", thr.id())
+                            /*
+                            if let Some(name) = thr.name() {
+                                format!("{name}")
+                            } else {
+                                format!("{:?}", thr)
+                            }
+                            */
+                        } else {
+                            format!("**DEAD**")
+                        };
+                    let cpu_usage = lq.cpu_usage();
+                    let workload = lq.workload();
+                    let backlogs = lq.backlogs();
+                    writeln!(&mut tw, "{id}\t{thread}\t{status}\t{cpu_usage:.8}\t{workload}\t{backlogs}").unwrap();
+                }
+                // guard dropping here...
+            }
+            tw.flush().unwrap();
+
+        }).unwrap();
+
+    scc::HashMap::new()
 });
 
 #[cfg(test)]

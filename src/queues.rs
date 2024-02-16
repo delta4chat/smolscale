@@ -184,7 +184,7 @@ impl core::fmt::Debug for LocalQueue {
         f.debug_struct("LocalQueue")
             .field("EPOCH", &Self::EPOCH)
             .field("id", &self.id())
-            .field("active", &self.active())
+            .field("thread", &self.thread())
             .field("idle", &self.idle.get())
             .field("backlogs", &self.backlogs.count())
             .field("cpu_usage",
@@ -204,7 +204,7 @@ impl LocalQueue {
     }
     pub fn idle(&self) -> bool {
         let val = self.idle.get();
-        log::debug!(
+        log::trace!(
             "LocalQueue {} = {}",
             self.id,
             if val {
@@ -221,11 +221,13 @@ impl LocalQueue {
     pub fn thread(&self)
         -> Option<std::thread::Thread>
     {
-        if let Some(ref thr) = *self.thread.borrow() {
-            Some( thr.clone() )
-        } else {
-            None
+        if let Ok(maybe_thr) = self.thread.try_borrow() {
+            if let Some(ref thr) = *maybe_thr {
+                return Some( thr.clone() );
+            }
         }
+
+        None
     }
 
     /// CPU usage of this worker thread
@@ -246,7 +248,7 @@ impl LocalQueue {
             }
         );
 
-        log::debug!("LocalQueue {}: average cpu usage = {:?}", self.id, avg);
+        log::trace!("LocalQueue {}: average cpu usage = {:?}", self.id, avg);
 
         if avg.is_nan() {
             f64::MAX
@@ -277,10 +279,10 @@ impl LocalQueue {
     }
 
     /// how many works done within this epoch?
-    fn workload(&self) -> usize {
+    pub fn workload(&self) -> usize {
         self._cpu_usages_within_epoch().len()
     }
-    fn backlogs(&self) -> u128 {
+    pub fn backlogs(&self) -> u128 {
         self.backlogs.count()
     }
 
@@ -289,7 +291,7 @@ impl LocalQueue {
         let wl = self.workload() as u128;
         let bl = self.backlogs();
 
-        log::debug!("LocalQueue {}: workload={wl}, backlogs={bl}", self.id);
+        log::trace!("LocalQueue {}: workload={wl}, backlogs={bl}", self.id);
         wl + bl
     }
 
@@ -336,7 +338,7 @@ impl LocalQueue {
         let _ = self.cpu_usage.insert(now, usage);
     }
 
-    /// if `idle_timeout` is None, then running this LocalQueue forever
+    /// if `idle_timeout` is None, then running this LocalQueue forever.
     /// otherwise this method will exit if idle within the specified duration.
     ///
     /// # Panics
@@ -404,7 +406,7 @@ impl LocalQueue {
                 futures_lite::future::yield_now().await;
                 let t = t.elapsed();
                 if t.as_millis() >= 500 {
-                    log::trace!("LocalQueue {}: yield_now() spends too much time! elapsed={t:?}", self.id);
+                    log::warn!("LocalQueue {}: yield_now() spends too much time! elapsed={t:?}", self.id);
                 } else {
                     log::trace!("LocalQueue {}: yield_now() = time<{t:?}>", self.id);
                 }

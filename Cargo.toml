@@ -51,12 +51,12 @@ tabwriter = "1.4.0"
 perfmon = "0.2.1"
 
 [profile.release]
-panic = "abort"
+panic = "unwind"
 opt-level = 3
 overflow-checks = true
-debug=2
-# lto=true
-# codegen-units=1
+debug = 2
+lto = true
+codegen-units = 1
 
 [dev-dependencies]
 criterion = "0.3"
