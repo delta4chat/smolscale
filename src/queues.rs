@@ -116,6 +116,7 @@ impl GlobalQueue {
                 stealing_from_others,
 
                 thread: RefCell::new(None),
+                exitable: Cell::new(false),
 
                 event: Rc::new(
                     LocalManualResetEvent::new(false)
@@ -155,6 +156,9 @@ pub struct LocalQueue {
     pub(crate) thread:
         RefCell<Option<std::thread::Thread>>,
 
+    /// if true, marking this worker thread temporary (it will exit if idle timeout reached)
+    pub(crate) exitable: Cell<bool>,
+
     /// Whether allows to stealing task from others LocalQueue ?
     pub(crate) stealing_from_others: bool,
 
@@ -170,9 +174,7 @@ impl Drop for LocalQueue {
         GLOBAL_QUEUE.locals.remove(&self.id);
 
         // push all the local tasks to the global queue
-        while let Some(runnable) = self.worker.pop() {
-            GLOBAL_QUEUE.push(runnable);
-        }
+        self.clear();
     }
 }
 
@@ -191,6 +193,7 @@ impl core::fmt::Debug for LocalQueue {
                    &self.cpu_usage.iter(&g).map(|(_,v)|*v).collect::<Vec<f64>>().pop().unwrap_or(f64::NAN)
             )
             .finish()
+        // guard dropping now
     }
 }
 
@@ -228,6 +231,10 @@ impl LocalQueue {
         }
 
         None
+    }
+
+    pub fn exitable(&self) -> bool {
+        self.exitable.get()
     }
 
     /// CPU usage of this worker thread
@@ -282,6 +289,8 @@ impl LocalQueue {
     pub fn workload(&self) -> usize {
         self._cpu_usages_within_epoch().len()
     }
+
+    /// how many works waiting to run?
     pub fn backlogs(&self) -> u128 {
         self.backlogs.count()
     }
@@ -358,6 +367,12 @@ impl LocalQueue {
         scopeguard::defer!({
             self.thread.replace(None);
         });
+
+        if idle_timeout.is_some() {
+            self.exitable.set(true);
+        } else {
+            self.exitable.set(false);
+        }
 
         /* to processing tasks... */
 
@@ -454,7 +469,7 @@ impl LocalQueue {
     /// Steals a whole batch and pops one.
     fn steal_and_pop(&self) -> Option<Runnable> {
         // try stealing from other local queues
-        if *SMOLSCALE2_ALLOW_SFO&&self.stealing_from_others{
+        if *SMOLSCALE2_ALLOW_SFO && self.stealing_from_others{
             let mut stealers = GLOBAL_QUEUE.stealers();
             fastrand::shuffle(&mut stealers);
 
@@ -494,12 +509,19 @@ impl LocalQueue {
 
         for _ in 0..to_steal {
             if let Ok(stolen) = global.pop() {
-                if let Err(back) = self.worker.push(stolen){
+                if let Err(back) = self.worker.push(stolen) {
                     return Some(back);
                 }
             }
         }
 
         self.worker.pop()
+    }
+
+    /// move all local tasks to GLOBAL_QUEUE.
+    pub(crate) fn clear(&self) {
+        while let Some(runnable) = self.worker.pop() {
+            GLOBAL_QUEUE.push(runnable);
+        }
     }
 }

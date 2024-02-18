@@ -222,7 +222,7 @@ fn monitor_loop() {
                     // let run_local = local_exec.run(futures_lite::future::pending::<()>());
                     if exitable {
                         new_executor::run_local_queue(
-                            Some(Duration::from_secs(9))
+                            Some(Duration::from_secs(10))
                         ).await;
                     } else {
                         new_executor::run_local_queue(
@@ -488,6 +488,11 @@ static PROFILE_MAP: Lazy<scc::HashMap<u128, (Arc<Backtrace>, Duration)>> = Lazy:
                             }
                             */
                         } else {
+                            // (prevent to spam terminal) skipping all exited temporary threads
+                            if lq.exitable() {
+                                continue;
+                            }
+
                             format!("**DEAD**")
                         };
                     let cpu_usage = lq.cpu_usage();

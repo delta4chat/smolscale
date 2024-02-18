@@ -23,6 +23,11 @@ pub async fn run_local_queue(
             UnsyncLazy::force(lq).clone()
         });
 
+    scopeguard::defer!({
+        // push all un-handled task to GLOBAL_QUEUE
+        local_queue.clear();
+    });
+
     local_queue.run(idle_timeout).await;
 }
 
