@@ -237,7 +237,7 @@ impl LocalQueue {
         self.exitable.get()
     }
 
-    /// CPU usage of this worker thread
+    /// average CPU usage of this worker thread
     pub fn cpu_usage(&self) -> f64 {
         let usage_bits: Vec<u128> =
             self._cpu_usages_within_epoch()
@@ -314,8 +314,6 @@ impl LocalQueue {
 
         // handle a bulk of Runnable
         while let Some(runnable) = self.pop() {
-            self._record_cpu_usage();
-
             if let Err(any_err) =
                 // if possible (panic="unwind"), catch all panic from Runnable, so we can prevent worker thread exited unexpectedly.
                 std::panic::catch_unwind(||{
@@ -332,18 +330,13 @@ impl LocalQueue {
         }
     }
 
-    fn _get_cpu_usage() -> anyhow::Result<f64> {
-        let mut stat = perfmon::cpu::ThreadStat::cur()?;
-        let usage: f64 = stat.cpu()?;
-
-        Ok(usage)
-    }
-
-    fn _record_cpu_usage(&self) {
-        let usage: f64 =
-            Self::_get_cpu_usage().unwrap_or(1.0);
-
+    fn _record_cpu_usage(
+        &self,
+        stat: &mut perfmon::cpu::ThreadStat
+    ) {
         let now = Instant::now();
+        let usage: f64 = stat.cpu().unwrap_or(1.0);
+
         let _ = self.cpu_usage.insert(now, usage);
     }
 
@@ -376,10 +369,15 @@ impl LocalQueue {
 
         /* to processing tasks... */
 
+        let mut maybe_stat=perfmon::cpu::ThreadStat::cur();
         let mut running: bool = true;
-        let started = Instant::now();
 
+        let started = Instant::now();
         while running {
+            if let Ok(ref mut stat) = maybe_stat {
+                self._record_cpu_usage(stat);
+            }
+
             // subscribe
             let local_evt = async {
                 self.event.wait().await;
