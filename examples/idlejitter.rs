@@ -2,32 +2,42 @@ use portable_atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 fn main() {
-  //smolscale2::permanently_single_threaded();
-  smolscale2::block_on(async move {
-    static CONTENDER: AtomicUsize = AtomicUsize::new(0);
-    for _ in 0..100000 {
-      smolscale2::spawn(async move {
-        loop {
-          futures_lite::future::yield_now().await;
-          for _ in 0..1000 {
-            CONTENDER.fetch_add(1, Ordering::SeqCst);
-          }
+    //smolscale2::permanently_single_threaded();
+    smolscale2::block_on(async move {
+        static CONTENDER: AtomicUsize =
+            AtomicUsize::new(0);
+        for _ in 0..100000 {
+            smolscale2::spawn(async move {
+                loop {
+                    futures_lite::future::yield_now()
+                        .await;
+                    for _ in 0..1000 {
+                        CONTENDER.fetch_add(
+                            1,
+                            Ordering::SeqCst,
+                        );
+                    }
+                }
+            })
+            .detach();
         }
-      })
-      .detach();
-    }
 
-    let mut accum = 1.0;
-    for iter in 0u64.. {
-      let start = Instant::now();
-      async_io::Timer::after(Duration::from_millis(1))
-        .await;
-      let elapsed_ms =
-        start.elapsed().as_secs_f64() * 1000.0;
-      accum = accum * 0.99 + elapsed_ms * 0.01;
-      if iter % 100 == 0 {
-        eprintln!("drift {} µs", (accum - 1.0) * 1000.0)
-      }
-    }
-  })
+        let mut accum = 1.0;
+        for iter in 0u64.. {
+            let start = Instant::now();
+            async_io::Timer::after(
+                Duration::from_millis(1),
+            )
+            .await;
+            let elapsed_ms =
+                start.elapsed().as_secs_f64() * 1000.0;
+            accum = accum * 0.99 + elapsed_ms * 0.01;
+            if iter % 100 == 0 {
+                eprintln!(
+                    "drift {} µs",
+                    (accum - 1.0) * 1000.0
+                )
+            }
+        }
+    })
 }

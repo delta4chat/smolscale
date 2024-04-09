@@ -1,6 +1,6 @@
 max_width = 58
 hard_tabs = false
-tab_spaces = 2
+tab_spaces = 4
 newline_style = "Unix"
 indent_style = "Visual"
 use_small_heuristics = "Default"

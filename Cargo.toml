@@ -1,6 +1,6 @@
 [package]
 name = "smolscale2"
-version = "0.5.5"
+version = "0.5.6"
 authors = ["nullchinchilla <nullchinchilla@pm.me>", "Delta4 <delta4chat@gmx.com>"]
 edition = "2021"
 description="hitdns fork of original smolscale"
@@ -31,7 +31,7 @@ portable-atomic = "1.6.0"
 concurrent-queue = { version = "2.4.0", features = ["portable-atomic"] }
 fastrand = "2.0.1"
 async-task = "4.7.0"
-once_cell = "1.19.0"
+once_cell = { version = "1.19.0", default-features = false, features = ["portable-atomic", "parking_lot"] }
 st3 = "0.4.1"
 backtrace = "0.3.69"
 scopeguard = "1.2.0"
@@ -48,7 +48,9 @@ async-executor = "1.8.0"
 futures-intrusive = "0.5.0"
 async-global-executor = { version = "2.4.1", features = ["async-io"] }
 tabwriter = "1.4.0"
-perfmon = "0.2.1"
+#perfmon = "0.2.1"
+perfmon = { path = "../perf-monitor-rs" }
+#sysinfo = { version = "0.30.5", features = ["serde"] }
 
 [profile.release]
 panic = "unwind"
