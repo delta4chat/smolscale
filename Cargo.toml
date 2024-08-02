@@ -48,7 +48,7 @@ async-executor = "1.8.0"
 futures-intrusive = "0.5.0"
 async-global-executor = { version = "2.4.1", features = ["async-io"] }
 tabwriter = "1.4.0"
-perfmon = "0.2.2"
+perfmon = { optional = true, version = "0.2.2" }
 #perfmon = { path = "../perf-monitor-rs" }
 #sysinfo = { version = "0.30.5", features = ["serde"] }
 

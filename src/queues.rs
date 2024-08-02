@@ -338,6 +338,7 @@ impl LocalQueue {
         }
     }
 
+    /*
     fn _record_cpu_usage(
         &self,
         stat: &perfmon::cpu::ThreadStat,
@@ -348,6 +349,7 @@ impl LocalQueue {
 
         let _ = self.cpu_usage.insert(now, usage);
     }
+    */
 
     /// if `idle_timeout` is None, then running this LocalQueue forever.
     /// otherwise this method will exit if idle within the specified duration.
@@ -374,8 +376,7 @@ impl LocalQueue {
             self.exitable.set(false);
         }
 
-        /* to processing tasks... */
-
+        /*
         let maybe_stat =
             match
             perfmon::cpu::ThreadStat::current()
@@ -386,6 +387,9 @@ impl LocalQueue {
                     None
                 }
             };
+        */
+
+        /* to processing tasks... */
         let mut running: bool = true;
 
         let started = Instant::now();
@@ -453,7 +457,8 @@ impl LocalQueue {
                 evt.await;
             }
 
-            if last_rec.elapsed().as_secs() < 5{
+            /*
+            if last_rec.elapsed().as_secs() < 5 {
                 continue;
             }
 
@@ -462,6 +467,7 @@ impl LocalQueue {
             }
 
             last_rec = Instant::now();
+            */
         }
     }
 
