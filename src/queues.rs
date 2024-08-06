@@ -81,7 +81,12 @@ impl GlobalQueue {
       );
         }
 
-        self.event.notify(1);
+        self.notify();
+    }
+
+    /// Notifies once.
+    pub fn notify(&self) {
+        self.event.notify_relaxed(1);
     }
 
     /// Rebalances the executor.
@@ -539,9 +544,10 @@ impl LocalQueue {
                     );
 
                     log::debug!(
-            "stolen {count} tasks from {id} to {}",
-            self.id
-          );
+                        "stolen {count} tasks from {id} to {}",
+                        self.id
+                    );
+
                     return Some(val);
                 }
             }

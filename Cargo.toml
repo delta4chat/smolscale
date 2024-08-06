@@ -1,6 +1,6 @@
 [package]
 name = "smolscale2"
-version = "0.5.7"
+version = "0.5.8"
 authors = ["nullchinchilla <nullchinchilla@pm.me>", "Delta4 <delta4chat@gmx.com>"]
 edition = "2021"
 description="hitdns fork of original smolscale"
@@ -12,11 +12,12 @@ repository="https://github.com/delta4chat/smolscale"
 [dependencies]
 # rtrb="0.1.4"
 # spin={version="0.9", default-features=false, features=["mutex", "spin_mutex"]}
+# futures-intrusive = "0.4"
 # crossbeam-queue="0.3"
 #thread_local="1"
 #cache-padded="1"
-#crossbeam-deque = "0.8.1"
-#flume = "0.10.12"
+# crossbeam-deque = "0.8.1"
+# flume = "0.10.12"
 # stacker="0.1"
 # moka = "0.9.4"
 #crossbeam-queue = "0.3.6"
@@ -26,6 +27,7 @@ parking_lot = "0.12.1"
 futures-util = "0.3.25"
 async-channel = "1.5.1"
 async-compat = "0.2.3"
+
 scc = { version = "2.0.16", features = ["serde"] }
 portable-atomic = "1.6.0"
 concurrent-queue = { version = "2.4.0", features = ["portable-atomic"] }
@@ -51,6 +53,7 @@ tabwriter = "1.4.0"
 perfmon = { optional = true, version = "0.2.2" }
 #perfmon = { path = "../perf-monitor-rs" }
 #sysinfo = { version = "0.30.5", features = ["serde"] }
+async-event = "0.2.1"
 
 [profile.release]
 panic = "unwind"

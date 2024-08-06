@@ -336,7 +336,6 @@ fn monitor_loop() {
             }
         }
     }
-    unreachable!()
 }
 
 /// Spawns a future onto the global executor and immediately blocks on it.`
@@ -346,6 +345,12 @@ pub fn block_on<T: Send + 'static>(
     async_io::block_on(
         WrappedFuture::new(future).compat(),
     )
+/*
+=======
+pub fn block_on<T: Send + 'static>(future: impl Future<Output = T> + Send + 'static) -> T {
+    async_io::block_on(future.compat())
+>>>>>>> upstream/master
+*/
 }
 
 /// Spawns a task onto the lazily-initialized global executor.
@@ -356,7 +361,7 @@ pub fn spawn<T: Send + 'static>(
     if *SMOLSCALE_USE_AGEX {
         async_global_executor::spawn(future)
     } else {
-        new_executor::spawn(WrappedFuture::new(future))
+        new_executor::spawn(future)
     }
 }
 

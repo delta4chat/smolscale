@@ -29,32 +29,34 @@ pub async fn run_local_queue(
     local_queue.run(idle_timeout).await;
 }
 
+/*
+=======
+/// Runs a queue
+pub async fn run_local_queue() {
+    LOCAL_QUEUE_ACTIVE.with(|r| r.set(true));
+    scopeguard::defer!(LOCAL_QUEUE_ACTIVE.with(|r| r.set(false)));
+    loop {
+        for _ in 0..200 {
+            while let Some(r) = LOCAL_QUEUE.with(|q| q.pop()) {
+                GLOBAL_QUEUE.notify();
+                r.run();
+            }
+
+            // we only wait here because we want *idle* workers to be notified, not just anyone
+            let evt = GLOBAL_QUEUE.wait();
+            evt.await;
+        }
+        futures_lite::future::yield_now().await;
+    }
+>>>>>>> upstream/master
+*/
+
 /// Spawns a task
 pub fn spawn<F>(future: F) -> async_task::Task<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    // the original scheduler.
-    fn old_scheduler(runnable: Runnable) {
-        // if the current thread is not processing tasks, we go to the global queue directly.
-        let lq_active =
-            LOCAL_QUEUE.with(|lq| lq.active());
-        if !lq_active || fastrand::usize(0..512) == 0 {
-            GLOBAL_QUEUE.push(runnable);
-            log::trace!(
-                "old_scheduler: pushed to global queue"
-            );
-        } else {
-            log::trace!(
-                "old_scheduler: pushed to local queue"
-            );
-            LOCAL_QUEUE.with(|lq| {
-                lq.push(runnable);
-            });
-        }
-    }
-
     // next-generation scheduler with load balancing
     fn lb_scheduler(runnable: Runnable) {
         let locals = &GLOBAL_QUEUE.locals;
@@ -151,5 +153,5 @@ where
 
 /// Globally rebalance.
 pub fn global_rebalance() {
-    GLOBAL_QUEUE.rebalance();
+    GLOBAL_QUEUE.notify();
 }
