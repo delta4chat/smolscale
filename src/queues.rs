@@ -95,6 +95,16 @@ impl GlobalQueue {
         self.event.notify_relaxed(usize::MAX);
     }
 
+/*
+=======
+    /// Subscribes to tasks, returning a LocalQueue.
+    pub fn subscribe(&self) -> LocalQueue<'_> {
+        let worker = Worker::<Runnable>::new(8192);
+        let id = self.id_ctr.fetch_add(1, Ordering::Relaxed);
+        self.stealers.write().unwrap().insert(id, worker.stealer());
+>>>>>>> upstream/master
+*/
+
     /// Subscribes to tasks, returning a LocalQueue.
     pub fn subscribe(&self) -> Arc<LocalQueue> {
         let stealing_from_others: bool =
@@ -108,9 +118,7 @@ impl GlobalQueue {
             };
 
         let local = Arc::new(LocalQueue {
-            id: namespace_unique_id(
-                "smolscale2-localqueue-id",
-            ),
+            id: namespace_unique_id("smolscale2-localqueue-id"),
 
             worker: Worker::<Runnable>::new(1024),
             stealing_from_others,

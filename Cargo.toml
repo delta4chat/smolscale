@@ -1,6 +1,6 @@
 [package]
 name = "smolscale2"
-version = "0.5.8"
+version = "0.5.11"
 authors = ["nullchinchilla <nullchinchilla@pm.me>", "Delta4 <delta4chat@gmx.com>"]
 edition = "2021"
 description="hitdns fork of original smolscale"
@@ -10,6 +10,8 @@ repository="https://github.com/delta4chat/smolscale"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+slab= "0.4.2"
+# concurrent-queue="1.2.2"
 # rtrb="0.1.4"
 # spin={version="0.9", default-features=false, features=["mutex", "spin_mutex"]}
 # futures-intrusive = "0.4"
@@ -54,6 +56,8 @@ perfmon = { optional = true, version = "0.2.2" }
 #perfmon = { path = "../perf-monitor-rs" }
 #sysinfo = { version = "0.30.5", features = ["serde"] }
 async-event = "0.2.1"
+tachyonix = "0.3.0"
+pollster = "0.3.0"
 
 [profile.release]
 panic = "unwind"
