@@ -48,13 +48,13 @@ pub async fn run_local_queue() {
         }
         futures_lite::future::yield_now().await;
     }
->>>>>>> upstream/master
-*/
-
 use std::thread::available_parallelism;
 
 use futures_lite::Future;
 use once_cell::sync::Lazy;
+>>>>>>> upstream/master
+*/
+
 
 /// Spawns a task
 pub fn spawn<F>(future: F) -> async_task::Task<F::Output>
@@ -75,4 +75,8 @@ where
         tick_monitor();
     }
     task
+}
+
+pub fn global_rebalance() {
+    GLOBAL_QUEUE.rebalance()
 }

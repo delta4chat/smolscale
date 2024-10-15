@@ -8,7 +8,6 @@
 //! - **When the CPU cores are not fully loaded**: Traditional work stealing optimizes for the case where most workers have work to do, which is only the case in fully-loaded scenarios. When workers often wake up and go back to sleep, however, a lot of CPU time is wasted stealing work. `smolscale` will instead drastically reduce CPU usage in these circumstances --- a `async-executor` app that takes 80% of CPU time may now take only 20%. Although this does not improve fully-loaded throughput, it significantly reduces power consumption and does increase throughput in circumstances where multiple thread pools compete for CPU time.
 //! - **When a lot of message-passing is happening**: Message-passing workloads often involve tasks quickly waking up and going back to sleep. In a work-stealing scheduler, this again floods the scheduler with stealing requests. `smolscale` can significantly improve throughput, especially compared to executors like `async-executor` that do not special-case message passing.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_compat::CompatExt;
 use backtrace::Backtrace;
@@ -77,7 +76,7 @@ pub const MONITOR_INTERVAL: Duration =
     // this long-interval is completely fine due to moniter_loop() uses 'park_timeout' for immediately woken if necessary
     Duration::from_secs(10);
 
-mod thread;
+//mod thread;
 
 static SINGLE_THREAD: AtomicBool = AtomicBool::new(false);
 
@@ -175,7 +174,7 @@ pub(crate) fn any_fmt(
 
     format!("{:?}", &any)
 }
-pub(crate) fn average<T>(set: &[T]) -> T
+pub(crate) fn _average<T>(set: &[T]) -> T
 where
     T: Default
         + Copy
@@ -513,7 +512,7 @@ static PROFILE_MAP: Lazy<
 
             eprintln!("----- SMOLSCALE LOCALQUEUE PROFILE -----");
             let mut tw = TabWriter::new(stderr());
-            writeln!(&mut tw, "QUEUE ID\tTHREAD\tSTATE\tCPU USAGE\tWORKLOAD\tBACKLOGS").unwrap();
+            writeln!(&mut tw, "QUEUE ID\tTHREAD\tSTATE").unwrap();
             {
                 let g = scc::ebr::Guard::new();
                 for (id, lq) in GLOBAL_QUEUE.locals.iter(&g) {
@@ -541,10 +540,7 @@ static PROFILE_MAP: Lazy<
 
                             format!("**DEAD**")
                         };
-                    let cpu_usage = lq.cpu_usage();
-                    let workload = lq.workload();
-                    let backlogs = lq.backlogs();
-                    writeln!(&mut tw, "{id}\t{thread}\t{status}\t{cpu_usage:.8}\t{workload}\t{backlogs}").unwrap();
+                    writeln!(&mut tw, "{id}\t{thread}\t{status}").unwrap();
                 }
                 // guard dropping here...
             }

@@ -119,6 +119,7 @@ impl GlobalQueue {
 
         let local = Arc::new(LocalQueue {
             id: namespace_unique_id("smolscale2-localqueue-id"),
+            idle: Cell::new(true),
 
             worker: Worker::<Runnable>::new(1024),
             stealing_from_others,
@@ -127,10 +128,6 @@ impl GlobalQueue {
             exitable: Cell::new(false),
 
             event: Rc::new(LocalManualResetEvent::new(false)),
-
-            backlogs: FastCounter::new(),
-            cpu_usage: scc::TreeIndex::new(),
-            idle: Cell::new(true),
         });
 
         self.locals
@@ -173,9 +170,6 @@ pub struct LocalQueue {
     /// Whether allows to stealing task from others LocalQueue ?
     pub(crate) stealing_from_others: bool,
 
-    // performances
-    backlogs: FastCounter,
-    cpu_usage: scc::TreeIndex<Instant, f64>,
     idle: Cell<bool>,
 }
 
@@ -194,25 +188,12 @@ impl core::fmt::Debug for LocalQueue {
         &self,
         f: &mut core::fmt::Formatter,
     ) -> Result<(), core::fmt::Error> {
-        let g = scc::ebr::Guard::new();
         f.debug_struct("LocalQueue")
             .field("EPOCH", &Self::EPOCH)
             .field("id", &self.id())
             .field("thread", &self.thread())
             .field("idle", &self.idle.get())
-            .field("backlogs", &self.backlogs.count())
-            .field(
-                "cpu_usage",
-                &self
-                    .cpu_usage
-                    .iter(&g)
-                    .map(|(_, v)| *v)
-                    .collect::<Vec<f64>>()
-                    .pop()
-                    .unwrap_or(f64::NAN),
-            )
             .finish()
-        // guard dropping now
     }
 }
 
@@ -250,81 +231,6 @@ impl LocalQueue {
         self.exitable.get()
     }
 
-    /// average CPU usage of this worker thread
-    pub fn cpu_usage(&self) -> f64 {
-        let usage_bits: Vec<u128> = self
-            ._cpu_usages_within_epoch()
-            .iter()
-            .map(|x| x.to_bits() as u128)
-            .collect();
-
-        let avg_bits = average(&usage_bits);
-        let avg = f64::from_bits(
-            if avg_bits > (u64::MAX as u128) {
-                log::error!(
-                    "overflow in LocalQueue.cpu_usage()"
-                );
-                u64::MAX
-            } else {
-                avg_bits as u64
-            },
-        );
-
-        log::trace!(
-            "LocalQueue {}: average cpu usage = {:?}",
-            self.id,
-            avg
-        );
-
-        if avg.is_nan() {
-            f64::MAX
-        } else {
-            avg
-        }
-    }
-    fn _cpu_usages_within_epoch(&self) -> Vec<f64> {
-        let mut usages = vec![];
-        let mut to_remove = vec![];
-
-        let guard = scc::ebr::Guard::new();
-        for (ts, usage) in self.cpu_usage.iter(&guard) {
-            if ts.elapsed() > Self::EPOCH {
-                to_remove.push(*ts);
-            } else {
-                usages.push(*usage);
-            }
-        }
-        core::mem::drop(guard);
-
-        for key in to_remove.iter() {
-            self.cpu_usage.remove(key);
-        }
-
-        return usages;
-    }
-
-    /// how many works done within this epoch?
-    pub fn workload(&self) -> usize {
-        self._cpu_usages_within_epoch().len()
-    }
-
-    /// how many works waiting to run?
-    pub fn backlogs(&self) -> u128 {
-        self.backlogs.count()
-    }
-
-    /// short-term and long-term workload stress
-    pub fn stress(&self) -> u128 {
-        let wl = self.workload() as u128;
-        let bl = self.backlogs();
-
-        log::trace!(
-            "LocalQueue {}: workload={wl}, backlogs={bl}",
-            self.id
-        );
-        wl + bl
-    }
-
     /// Ticks this LocalQueue.
     /// running until the queue exhausted.
     pub fn tick(&self) {
@@ -351,20 +257,7 @@ impl LocalQueue {
         }
     }
 
-    /*
-    fn _record_cpu_usage(
-        &self,
-        stat: &perfmon::cpu::ThreadStat,
-    ) {
-        let now = Instant::now();
-        let usage: f64 = stat.cpu_usage()
-                             .unwrap_or(1.0);
-
-        let _ = self.cpu_usage.insert(now, usage);
-    }
-    */
-
-    /// if `idle_timeout` is None, then running this LocalQueue forever.
+    /// if `idle_timeout` is None, running this LocalQueue forever.
     /// otherwise this method will exit if idle within the specified duration.
     ///
     /// # Panics
@@ -406,7 +299,6 @@ impl LocalQueue {
         let mut running: bool = true;
 
         let started = Instant::now();
-        let mut last_rec = started;
         while running {
             // subscribe
             let local_evt = async {
@@ -469,18 +361,6 @@ impl LocalQueue {
             } else {
                 evt.await;
             }
-
-            /*
-            if last_rec.elapsed().as_secs() < 5 {
-                continue;
-            }
-
-            if let Some(ref stat) = maybe_stat {
-                self._record_cpu_usage(stat);
-            }
-
-            last_rec = Instant::now();
-            */
         }
     }
 
@@ -488,14 +368,7 @@ impl LocalQueue {
     /// 2. if this LocalQueue is empty, then try stealing task from other local queues (if allowed).
     /// 3. if all others LocalQueue is still empty (or disallowed to stealing from others), then fallback to stealing task from GlobalQueue anyway.
     pub fn next(&self) -> Option<Runnable> {
-        let maybe = self.worker.pop();
-        if maybe.is_some() {
-            if self.backlogs.count() > 0 {
-                self.backlogs.decr();
-            }
-        }
-
-        maybe.or_else(|| self.steal_and_pop())
+        self.worker.pop().or_else(|| { self.steal_and_pop() })
     }
     pub fn pop(&self) -> Option<Runnable> {
         self.next()
@@ -518,7 +391,6 @@ impl LocalQueue {
             );
             // notify the worker thread for new runnable
             self.event.set();
-            self.backlogs.incr();
         }
     }
     pub fn push(&self, runnable: Runnable) {
@@ -543,13 +415,6 @@ impl LocalQueue {
                     let count = count
                         .checked_add(1)
                         .unwrap_or(count);
-
-                    GLOBAL_QUEUE.locals.peek_with(
-                        &id,
-                        |_, lq| {
-                            lq.backlogs.decr();
-                        },
-                    );
 
                     log::debug!(
                         "stolen {count} tasks from {id} to {}",
