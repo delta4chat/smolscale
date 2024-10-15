@@ -48,9 +48,9 @@ static ACTIVE_TASKS: FastCounter = FastCounter::new();
 static FUTURES_BEING_POLLED: FastCounter =
     FastCounter::new();
 
-pub const MIN_THREADS: usize = 1;
+static MIN_THREADS: Lazy<AtomicUsize> = Lazy::new(|| { AtomicUsize::new(num_cpus::get()) });
 static MAX_THREADS: Lazy<AtomicUsize> = Lazy::new(|| {
-    let mut max = num_cpus::get();
+    let mut max = MIN_THREADS.load(Relaxed);
     max *= 10;
 
     if max < 20 {
@@ -102,12 +102,23 @@ pub fn permanently_single_threaded() {
     SINGLE_THREAD.store(true, Relaxed);
 }
 
+
+
 /// set maximum number of worker threads
 pub fn set_max_threads(mut max: usize) {
-    if max < MIN_THREADS {
-        max = MIN_THREADS;
+    let min = MIN_THREADS.load(Relaxed);
+    if max < min {
+        max = min;
     }
     MAX_THREADS.store(max, Relaxed);
+}
+
+/// set minimum number of worker threads
+pub fn set_threads(mut min: usize) {
+    if min < 1 {
+        min = 1;
+    }
+    MIN_THREADS.store(min, Relaxed);
 }
 
 /// Returns the number of running worker threads.
@@ -224,6 +235,7 @@ fn monitor_loop() {
             } else {
                 format!("sscale-wkr-c-{idx}")
             })
+            .stack_size(1_000_000)
             .spawn(move || {
                 scopeguard::defer!({
                     THREAD_MAP.remove(&idx);
@@ -259,10 +271,8 @@ fn monitor_loop() {
         ).expect("cannot add spawned worker thread to global list of join handles");
     }
 
-    let mut threads = num_cpus::get();
-    if SINGLE_THREAD.load(Relaxed)
-        || std::env::var("SMOLSCALE_SINGLE").is_ok()
-    {
+    let mut threads = MIN_THREADS.load(Relaxed);
+    if SINGLE_THREAD.load(Relaxed) || std::env::var("SMOLSCALE_SINGLE").is_ok() {
         threads = 1;
     }
 
@@ -275,14 +285,12 @@ fn monitor_loop() {
         .spawn(|| {
             sleep(MONITOR_INTERVAL);
             loop {
-                if running_threads() >= MIN_THREADS {
+                if running_threads() >= MIN_THREADS.load(Relaxed) {
                     sleep(MONITOR_INTERVAL);
                     continue;
                 }
 
-                log::info!(
-                    "start new thread for panic safe!"
-                );
+                log::info!("start new thread for panic safe!");
                 start_thread(false, true);
             }
         })
