@@ -189,18 +189,15 @@ impl core::fmt::Debug for LocalQueue {
         f: &mut core::fmt::Formatter,
     ) -> Result<(), core::fmt::Error> {
         f.debug_struct("LocalQueue")
-            .field("EPOCH", &Self::EPOCH)
             .field("id", &self.id())
             .field("thread", &self.thread())
             .field("idle", &self.idle.get())
+            .field("exitable", &self.exitable())
             .finish()
     }
 }
 
 impl LocalQueue {
-    // within ten minutes
-    const EPOCH: Duration = Duration::from_secs(600);
-
     /* ===== read-only Getters ===== */
     pub fn id(&self) -> u128 {
         self.id
@@ -329,10 +326,10 @@ impl LocalQueue {
                 );
             }
 
-            // with a chance of 10/1000 (5.0 %) a half of workers will yield time to others.
+            // with a chance of 100/1000 (5.0 %) a half of workers will yield time to others.
             if
                 // this avoid to yield too quickly
-                started.elapsed().subsec_millis() < 10
+                started.elapsed().subsec_millis() < 100
                 &&
                 // only yields half of total worker threads
                 (self.id % 2) == 0
@@ -343,10 +340,7 @@ impl LocalQueue {
                 if t.as_millis() >= 500 {
                     log::warn!("LocalQueue {}: yield_now() spends too much time! elapsed={t:?}", self.id);
                 } else {
-                    log::trace!(
-            "LocalQueue {}: yield_now() = time<{t:?}>",
-            self.id
-          );
+                    log::trace!("LocalQueue {}: yield_now() = time<{t:?}>", self.id);
                 }
             }
 
@@ -376,9 +370,7 @@ impl LocalQueue {
 
     /// Pushes an item to the local queue, falling back to the global queue if the local queue is full.
     pub fn add(&self, runnable: Runnable) {
-        if let Err(runnable) =
-                      self.worker.push(runnable)
-        {
+        if let Err(runnable) = self.worker.push(runnable) {
             log::trace!(
                 "LocalQueue {}: new task pushed globally",
                 self.id
@@ -407,14 +399,8 @@ impl LocalQueue {
             fastrand::shuffle(&mut stealers);
 
             for (id, stealer) in stealers.into_iter() {
-                if let Ok((val, count)) = stealer
-                    .steal_and_pop(&self.worker, |n| {
-                        (n / 2 + 1).min(64)
-                    })
-                {
-                    let count = count
-                        .checked_add(1)
-                        .unwrap_or(count);
+                if let Ok((val, count)) = stealer.steal_and_pop(&self.worker, |n| { (n / 2 + 1).min(64) }) {
+                    let count = count.checked_add(1).unwrap_or(count);
 
                     log::debug!(
                         "stolen {count} tasks from {id} to {}",
