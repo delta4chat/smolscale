@@ -9,11 +9,18 @@ pub struct ExecutorThread {
 impl ExecutorThread {
     pub fn new() -> Self {
         let (send, recv) = tachyonix::channel(65536);
+
+        let fut = execute_loop(recv);
+
+        #[cfg(feature="async-compat")]
+        let fut = fut.compat();
+
         std::thread::Builder::new()
             .name("sscale-exec".into())
             .stack_size(1_000_000)
-            .spawn(move || async_io::block_on(execute_loop(recv).compat()))
+            .spawn(move || { async_io::block_on(fut) })
             .unwrap();
+
         Self { send }
     }
 

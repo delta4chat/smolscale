@@ -8,8 +8,9 @@
 //! - **When the CPU cores are not fully loaded**: Traditional work stealing optimizes for the case where most workers have work to do, which is only the case in fully-loaded scenarios. When workers often wake up and go back to sleep, however, a lot of CPU time is wasted stealing work. `smolscale` will instead drastically reduce CPU usage in these circumstances --- a `async-executor` app that takes 80% of CPU time may now take only 20%. Although this does not improve fully-loaded throughput, it significantly reduces power consumption and does increase throughput in circumstances where multiple thread pools compete for CPU time.
 //! - **When a lot of message-passing is happening**: Message-passing workloads often involve tasks quickly waking up and going back to sleep. In a work-stealing scheduler, this again floods the scheduler with stealing requests. `smolscale` can significantly improve throughput, especially compared to executors like `async-executor` that do not special-case message passing.
 
-
+#[cfg(feature="async-compat")]
 use async_compat::CompatExt;
+
 use backtrace::Backtrace;
 use futures_lite::prelude::*;
 use once_cell::sync::{Lazy, OnceCell};
@@ -255,8 +256,10 @@ fn monitor_loop() {
                         )
                         .await;
                     };
-                }
-                .compat();
+                };
+
+                #[cfg(feature="async-compat")]
+                let fut = fut.compat();
 
                 if process_io {
                     async_io::block_on(fut)
@@ -353,15 +356,12 @@ fn monitor_loop() {
 pub fn block_on<T: Send + 'static>(
     future: impl Future<Output = T> + Send + 'static,
 ) -> T {
-    async_io::block_on(
-        WrappedFuture::new(future).compat(),
-    )
-/*
-=======
-pub fn block_on<T: Send + 'static>(future: impl Future<Output = T> + Send + 'static) -> T {
-    async_io::block_on(future.compat())
->>>>>>> upstream/master
-*/
+    let fut = WrappedFuture::new(future);
+
+    #[cfg(feature="async-compat")]
+    let fut = fut.compat();
+
+    async_io::block_on(fut)
 }
 
 /// Spawns a task onto the lazily-initialized global executor.
